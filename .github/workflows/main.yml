@@ -15,7 +15,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22           # ← Updated from 20 (deprecated)
+          node-version: 22
 
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
@@ -27,7 +27,24 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install dependencies
-        run: npm install             # ← Back to npm install (no lockfile in repo)
+        run: npm install
+
+      - name: Generate Native Android Project
+        run: npx expo prebuild --platform android --clean
+
+      # ↓ Étape clé : forcer des versions AGP/Gradle compatibles avec Expo
+      - name: Patch AGP and Gradle versions for Expo compatibility
+        run: |
+          # Force AGP 8.1.4 (compatible Expo SDK 50/51)
+          sed -i 's/com\.android\.tools\.build:gradle:[0-9.]*/com.android.tools.build:gradle:8.1.4/g' android/build.gradle
+          echo "=== android/build.gradle (AGP) après patch ==="
+          grep "com.android.tools.build" android/build.gradle
+
+          # Force Gradle 8.6 (compatible avec AGP 8.1.4)
+          sed -i 's|gradle-[0-9.]*-all\.zip|gradle-8.6-all.zip|g' android/gradle/wrapper/gradle-wrapper.properties
+          sed -i 's|gradle-[0-9.]*-bin\.zip|gradle-8.6-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
+          echo "=== gradle-wrapper.properties après patch ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -35,17 +52,14 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-gradle-8.6-${{ hashFiles('**/*.gradle*') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Generate Native Android Project
-        run: npx expo prebuild --platform android --clean
+            ${{ runner.os }}-gradle-8.6-
 
       - name: Build Release APK
         run: |
           chmod +x android/gradlew
-          cd android && ./gradlew assembleRelease --no-daemon
+          cd android && ./gradlew assembleRelease --no-daemon --stacktrace
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8"
 
