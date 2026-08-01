@@ -29,16 +29,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Generate Android native project (Prebuild)
-        run: npx expo prebuild --platform android
+      - name: Generate Native Android Project
+        run: npx expo prebuild --platform android --clean
 
-      - name: Make Gradle wrapper executable
-        run: chmod +x android/gradlew
-
-      - name: Build Android Release APK
+      - name: Build Release APK via Gradle
         run: |
           cd android
-          ./gradlew assembleRelease --no-daemon
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
