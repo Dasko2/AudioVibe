@@ -32,19 +32,14 @@ jobs:
       - name: Generate Native Android Project
         run: npx expo prebuild --platform android --clean
 
-      # ↓ Étape clé : forcer des versions AGP/Gradle compatibles avec Expo
-      - name: Patch AGP and Gradle versions for Expo compatibility
+      - name: Patch Gradle version for Expo SDK 52 compatibility
         run: |
-          # Force AGP 8.1.4 (compatible Expo SDK 50/51)
-          sed -i 's/com\.android\.tools\.build:gradle:[0-9.]*/com.android.tools.build:gradle:8.1.4/g' android/build.gradle
-          echo "=== android/build.gradle (AGP) après patch ==="
-          grep "com.android.tools.build" android/build.gradle
-
-          # Force Gradle 8.6 (compatible avec AGP 8.1.4)
-          sed -i 's|gradle-[0-9.]*-all\.zip|gradle-8.6-all.zip|g' android/gradle/wrapper/gradle-wrapper.properties
-          sed -i 's|gradle-[0-9.]*-bin\.zip|gradle-8.6-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
-          echo "=== gradle-wrapper.properties après patch ==="
-          cat android/gradle/wrapper/gradle-wrapper.properties
+          # Gradle 8.8 = compatible avec AGP 8.3.x (généré par Expo SDK 52)
+          # 8.6 = trop vieux, 8.10.2 = trop récent
+          sed -i 's|gradle-[0-9.]*-all\.zip|gradle-8.8-all.zip|g' android/gradle/wrapper/gradle-wrapper.properties
+          sed -i 's|gradle-[0-9.]*-bin\.zip|gradle-8.8-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
+          echo "=== Vérification ==="
+          grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -52,19 +47,11 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-8.6-${{ hashFiles('**/*.gradle*') }}
+          key: ${{ runner.os }}-gradle-8.8-${{ hashFiles('**/*.gradle*') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-8.6-
+            ${{ runner.os }}-gradle-8.8-
 
       - name: Build Release APK
         run: |
           chmod +x android/gradlew
-          cd android && ./gradlew assembleRelease --no-daemon --stacktrace
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8"
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          cd android && ./gradlew assembleRelease --no-daemon
