@@ -29,12 +29,17 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build APK with Expo CLI
-        run: npx expo run:android --variant release
+      - name: Generate Native Android Project
+        run: npx expo prebuild --platform android --clean
+
+      - name: Build Release APK via Gradle
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease -x test --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
           path: android/app/build/outputs/apk/release/*.apk
-
