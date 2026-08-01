@@ -32,14 +32,15 @@ jobs:
       - name: Generate Native Android Project
         run: npx expo prebuild --platform android --clean
 
-      - name: Build Release APK via Gradle
+      - name: Build Release APK via Gradle Wrapper
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease -x test --no-daemon
+          ./gradlew assembleRelease --no-daemon -Dorg.gradle.project.expo.autolinking.enabled=true
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
           path: android/app/build/outputs/apk/release/*.apk
+
