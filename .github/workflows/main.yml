@@ -32,11 +32,6 @@ jobs:
       - name: Generate Native Android Project
         run: npx expo prebuild --platform android --clean
 
-      - name: Bundle React Native JS Assets
-        run: |
-          mkdir -p android/app/src/main/assets
-          npx react-native bundle --platform android --dev false --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/res/
-
       - name: Build Release APK via Gradle Wrapper
         run: |
           chmod +x android/gradlew
@@ -47,3 +42,4 @@ jobs:
         with:
           name: app-release-apk
           path: android/app/build/outputs/apk/release/*.apk
+
