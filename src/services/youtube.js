@@ -8,28 +8,16 @@
 const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const BASE = "https://www.youtube.com/youtubei/v1";
 
-/** Clients InnerTube utilisés localement, par ordre de préférence. */
+/** Clients InnerTube utilisés localement, par ordre de préférence.
+ *  ANDROID_VR / IOS / TVHTML5 ne réclament pas de "poToken" : ce sont eux qui
+ *  passent quand le client ANDROID classique renvoie UNPLAYABLE. */
 export const CLIENTS = [
-  {
-    id: "ANDROID",
-    label: "Android (local)",
-    context: {
-      clientName: "ANDROID",
-      clientVersion: "19.09.37",
-      androidSdkVersion: 30,
-      osName: "Android",
-      osVersion: "11",
-      hl: "fr",
-    },
-    ua: "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-    clientNameHeader: "3",
-  },
   {
     id: "ANDROID_VR",
     label: "Android VR (local)",
     context: {
       clientName: "ANDROID_VR",
-      clientVersion: "1.60.19",
+      clientVersion: "1.61.43",
       deviceMake: "Oculus",
       deviceModel: "Quest 3",
       androidSdkVersion: 32,
@@ -37,7 +25,7 @@ export const CLIENTS = [
       osVersion: "12L",
       hl: "fr",
     },
-    ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L) gzip",
+    ua: "com.google.android.apps.youtube.vr.oculus/1.61.43 (Linux; U; Android 12L) gzip",
     clientNameHeader: "28",
   },
   {
@@ -45,15 +33,41 @@ export const CLIENTS = [
     label: "iOS (local)",
     context: {
       clientName: "IOS",
-      clientVersion: "19.09.3",
+      clientVersion: "20.10.4",
       deviceMake: "Apple",
-      deviceModel: "iPhone14,3",
+      deviceModel: "iPhone16,2",
       osName: "iPhone",
-      osVersion: "15.6.0.19G71",
+      osVersion: "18.3.2.22D82",
       hl: "fr",
     },
-    ua: "com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)",
+    ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)",
     clientNameHeader: "5",
+  },
+  {
+    id: "TVHTML5",
+    label: "TV intégrée (local)",
+    context: {
+      clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+      clientVersion: "2.0",
+      hl: "fr",
+    },
+    ua: "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+    clientNameHeader: "85",
+    embed: true,
+  },
+  {
+    id: "ANDROID",
+    label: "Android (local)",
+    context: {
+      clientName: "ANDROID",
+      clientVersion: "19.44.38",
+      androidSdkVersion: 30,
+      osName: "Android",
+      osVersion: "11",
+      hl: "fr",
+    },
+    ua: "com.google.android.youtube/19.44.38 (Linux; U; Android 11) gzip",
+    clientNameHeader: "3",
   },
   {
     id: "WEB",
@@ -67,6 +81,7 @@ export const CLIENTS = [
     clientNameHeader: "1",
   },
 ];
+
 
 let preferredClient = null;
 export function setPreferredClient(id) {
@@ -231,31 +246,42 @@ export async function fetchPlaylist(urlOrId) {
 /**
  * Économie de données maximale : on ne garde que les flux audio-only
  * (Opus/WebM bas débit ~64-96 kbps => ~2 Mo pour 3-4 min).
+ * On essaie chaque client local jusqu'à en trouver un qui rend un flux jouable
+ * (ANDROID renvoie souvent UNPLAYABLE, ANDROID_VR / IOS / TV prennent le relais).
  */
 export async function getAudioStream(videoId, { hifi = false } = {}) {
   let lastErr;
+  let lastReason;
   for (const client of orderedClients()) {
     try {
-      const data = await innertube(
-        "player",
-        {
-          videoId,
-          contentCheckOk: true,
-          racyCheckOk: true,
-          playbackContext: {
-            contentPlaybackContext: { html5Preference: "HTML5_PREF_WANTS" },
-          },
+      const body = {
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+        playbackContext: {
+          contentPlaybackContext: { html5Preference: "HTML5_PREF_WANTS" },
         },
-        client
-      );
+      };
+      if (client.embed) {
+        body.thirdParty = { embedUrl: "https://www.youtube.com/" };
+      }
+      const data = await innertube("player", body, client);
 
       const status = data?.playabilityStatus?.status;
-      if (status && status !== "OK") throw new Error(status);
+      const reason =
+        textOf(data?.playabilityStatus?.reason) ||
+        data?.playabilityStatus?.reason ||
+        "";
+      if (status && status !== "OK") {
+        lastReason = reason || status;
+        throw new Error(status);
+      }
 
       const formats = [
         ...(data?.streamingData?.adaptiveFormats || []),
         ...(data?.streamingData?.formats || []),
       ];
+      // Un flux sans `url` (signatureCipher) n'est pas lisible localement.
       const audio = formats.filter(
         (f) => f.url && /audio\//i.test(f.mimeType || "")
       );
@@ -285,12 +311,17 @@ export async function getAudioStream(videoId, { hifi = false } = {}) {
       };
     } catch (e) {
       lastErr = e;
+      // Ce client est grillé pour cette session : on ne le remet pas en tête.
+      if (preferredClient === client.id) preferredClient = null;
     }
   }
   throw new Error(
-    "Extraction audio locale impossible (" + (lastErr?.message || "réseau") + ")"
+    "Lecture impossible pour ce titre (" +
+      (lastReason || lastErr?.message || "réseau") +
+      ")"
   );
 }
+
 
 export const estimateSizeMb = (bitrate, durationSec) =>
   (((bitrate || 64000) / 8) * (durationSec || 0)) / 1024 / 1024;
