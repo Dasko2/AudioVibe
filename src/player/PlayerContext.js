@@ -11,7 +11,7 @@ import React, {
 import { Platform } from "react-native";
 
 import { addHistory, getDownload } from "../data/db";
-import { getAudioStream } from "../services/piped";
+import { getAudioStream, getHlsStream } from "../services/piped";
 import { useSettings } from "../services/settings";
 
 const Ctx = createContext(null);
@@ -105,29 +105,38 @@ export function PlayerProvider({ children }) {
           onStatus
         ));
       } catch (firstError) {
-        // ExoPlayer et fetch n'utilisent pas la même pile HTTP. Sur certains
-        // appareils, googlevideo accepte le probe puis refuse ExoPlayer. Une
-        // URL fraîche lue par MediaPlayer évite ce faux positif sans proxy.
-        if (offline?.uri || Platform.OS !== "android") throw firstError;
-        const fresh = await getAudioStream(track.id, {
-          hifi: !settings.dataSaver,
-        });
-        br = fresh.bitrate;
-        headers = fresh.headers;
-        uri = fresh.url;
-        ({ sound } = await Audio.Sound.createAsync(
-          {
-            uri,
-            headers,
-            overrideFileExtensionAndroid: "webm",
-          },
-          {
-            shouldPlay: true,
-            progressUpdateIntervalMillis: 500,
-            androidImplementation: "MediaPlayer",
-          },
-          onStatus
-        ));
+        // ExoPlayer et fetch n'utilisent pas la même pile HTTP : googlevideo
+        // peut accepter le probe puis refuser ExoPlayer (403), et MediaPlayer
+        // échoue souvent en -1005. Le manifeste HLS du client iOS n'est lié à
+        // aucun User-Agent : ExoPlayer le lit nativement.
+        if (offline?.uri) throw firstError;
+        try {
+          const hls = await getHlsStream(track.id);
+          uri = hls.url;
+          br = 0;
+          ({ sound } = await Audio.Sound.createAsync(
+            { uri, overrideFileExtensionAndroid: "m3u8" },
+            { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+            onStatus
+          ));
+        } catch (hlsError) {
+          if (Platform.OS !== "android") throw hlsError;
+          const fresh = await getAudioStream(track.id, {
+            hifi: !settings.dataSaver,
+          });
+          br = fresh.bitrate;
+          headers = fresh.headers;
+          uri = fresh.url;
+          ({ sound } = await Audio.Sound.createAsync(
+            { uri, headers, overrideFileExtensionAndroid: "webm" },
+            {
+              shouldPlay: true,
+              progressUpdateIntervalMillis: 500,
+              androidImplementation: "MediaPlayer",
+            },
+            onStatus
+          ));
+        }
       }
       setBitrate(br);
       soundRef.current = sound;
