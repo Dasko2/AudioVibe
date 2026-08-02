@@ -249,6 +249,44 @@ export async function fetchPlaylist(urlOrId) {
  * On essaie chaque client local jusqu'à en trouver un qui rend un flux jouable
  * (ANDROID renvoie souvent UNPLAYABLE, ANDROID_VR / IOS / TV prennent le relais).
  */
+/** En-têtes exigés par googlevideo pour rejouer une URL : elle est liée au
+ *  client (UA) qui l'a demandée. Sans eux ExoPlayer reçoit un 403. */
+export function streamHeaders(clientId) {
+  const c = CLIENTS.find((x) => x.id === clientId) || CLIENTS[0];
+  return {
+    "User-Agent": c.ua,
+    Origin: "https://www.youtube.com",
+    Referer: "https://www.youtube.com/",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+  };
+}
+
+/** Vérifie que l'URL est réellement lisible (googlevideo renvoie parfois 403
+ *  sur une URL pourtant présente dans la réponse player). */
+async function probe(url, headers, ms = 8000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      signal: ctrl.signal,
+      headers: { ...headers, Range: "bytes=0-1" },
+    });
+    // 200 (serveur ignorant Range) ou 206 = flux jouable.
+    return res.status === 200 || res.status === 206;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Économie de données maximale : on ne garde que les flux audio-only
+ * (Opus/WebM bas débit ~64-96 kbps => ~2 Mo pour 3-4 min).
+ * On essaie chaque client local jusqu'à en trouver un dont l'URL répond
+ * réellement (et non un 403 au moment de la lecture).
+ */
 export async function getAudioStream(videoId, { hifi = false } = {}) {
   let lastErr;
   let lastReason;
@@ -291,15 +329,30 @@ export async function getAudioStream(videoId, { hifi = false } = {}) {
       const pool = opus.length ? opus : audio;
       const sorted = [...pool].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
 
-      const chosen = hifi
+      const preferred = hifi
         ? sorted[sorted.length - 1]
         : sorted.find((f) => (f.bitrate || 0) >= 48000) || sorted[0];
+
+      // Ordre d'essai : le format voulu d'abord, puis les autres en secours.
+      const candidates = [preferred, ...sorted.filter((f) => f !== preferred)];
+      const headers = streamHeaders(client.id);
+
+      let chosen = null;
+      for (const f of candidates) {
+        if (await probe(f.url, headers)) {
+          chosen = f;
+          break;
+        }
+      }
+      if (!chosen) throw new Error("403");
 
       setPreferredClient(client.id);
       const details = data?.videoDetails || {};
       const thumbs = details.thumbnail?.thumbnails || [];
       return {
         url: chosen.url,
+        headers,
+        client: client.id,
         bitrate: chosen.bitrate || 0,
         mime: chosen.mimeType || "audio/webm",
         title: details.title,

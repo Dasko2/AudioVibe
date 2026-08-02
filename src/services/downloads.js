@@ -17,7 +17,9 @@ export async function downloadTrack(track, { hifi = false } = {}) {
 
   const stream = await getAudioStream(track.id, { hifi });
   const target = `${DIR}${track.id}.webm`;
-  const res = await FileSystem.downloadAsync(stream.url, target);
+  const res = await FileSystem.downloadAsync(stream.url, target, {
+    headers: stream.headers,
+  });
   const info = await FileSystem.getInfoAsync(res.uri);
   await addDownload(track, res.uri, info.size || 0);
   return { uri: res.uri, bytes: info.size || 0 };
