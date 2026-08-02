@@ -9,6 +9,7 @@ import {
   CLIENTS,
   fetchPlaylist,
   getAudioStream,
+  getDashStream,
   getHlsStream,
   searchTracks,
   setPreferredClient,
@@ -43,6 +44,7 @@ export async function setPreferredInstance(id) {
 export {
   fetchPlaylist,
   getAudioStream,
+  getDashStream,
   getHlsStream,
   searchTracks,
   trending,

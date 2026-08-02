@@ -9,9 +9,26 @@ const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
 const BASE = "https://www.youtube.com/youtubei/v1";
 
 /** Clients InnerTube utilisés localement, par ordre de préférence.
- *  ANDROID_VR / IOS / TVHTML5 ne réclament pas de "poToken" : ce sont eux qui
- *  passent quand le client ANDROID classique renvoie UNPLAYABLE. */
+ *
+ *  v1.0.5 : ajout ANDROID_TESTSUITE (pas de poToken, URLs directes fiables),
+ *  WEB_EMBEDDED_PLAYER (fonctionne pour les vidéos embarquables).
+ *  Les anciens clients restent en fallback.
+ */
 export const CLIENTS = [
+  {
+    id: "ANDROID_TESTSUITE",
+    label: "Android Test Suite",
+    context: {
+      clientName: "ANDROID_TESTSUITE",
+      clientVersion: "1.9",
+      androidSdkVersion: 34,
+      osName: "Android",
+      osVersion: "14",
+      hl: "fr",
+    },
+    ua: "com.google.android.youtube/1.9 (Linux; U; Android 14) gzip",
+    clientNameHeader: "30",
+  },
   {
     id: "ANDROID_VR",
     label: "Android VR (local)",
@@ -53,6 +70,18 @@ export const CLIENTS = [
     },
     ua: "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
     clientNameHeader: "85",
+    embed: true,
+  },
+  {
+    id: "WEB_EMBEDDED",
+    label: "Web Embedded",
+    context: {
+      clientName: "WEB_EMBEDDED_PLAYER",
+      clientVersion: "2.20240401.00.00",
+      hl: "fr",
+    },
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+    clientNameHeader: "56",
     embed: true,
   },
   {
@@ -206,10 +235,9 @@ function extractVideos(data) {
   return out;
 }
 
-/* ---------- API publique (identique à l'ancienne) ---------- */
+/* ---------- API publique ---------- */
 
 export async function searchTracks(query) {
-  // params = filtre "vidéos" trié par pertinence
   const { data } = await anyClient("search", {
     query,
     params: "EgIQAQ%3D%3D",
@@ -226,7 +254,6 @@ export async function trending(region = "FR") {
     const list = extractVideos(data).filter((t) => t.duration > 0);
     if (list.length) return list;
   } catch {}
-  // Repli local : une recherche générique reste 100 % côté appareil.
   return searchTracks("top hits musique " + region);
 }
 
@@ -243,8 +270,7 @@ export async function fetchPlaylist(urlOrId) {
   return { name, items: extractVideos(data) };
 }
 
-/** En-têtes exigés par googlevideo pour rejouer une URL : elle est liée au
- *  client (UA) qui l'a demandée. Sans eux ExoPlayer reçoit un 403. */
+/** En-têtes exigés par googlevideo pour rejouer une URL liée au client. */
 export function streamHeaders(clientId) {
   const c = CLIENTS.find((x) => x.id === clientId) || CLIENTS[0];
   return {
@@ -256,16 +282,15 @@ export function streamHeaders(clientId) {
 }
 
 /**
- * Retourne les flux audio disponibles pour une vidéo (WebM/Opus ET AAC/MP4).
+ * Retourne les flux audio disponibles pour une vidéo.
  *
- * Changement v1.0.4 : suppression du `probe` fetch.
- * La probe fetch() ignorait le User-Agent (en-tête "interdit" en React Native
- * Android), ce qui donnait une fausse confiance : l'URL répondait 206 au probe
- * sans UA, mais ExoPlayer envoyait l'UA Oculus et recevait un 403 / -1005.
- * On laisse désormais ExoPlayer décider directement.
- *
- * Retourne à la fois l'URL WebM/Opus préférée et, si disponible, une URL
- * AAC/MP4 de secours (plus compatible avec certains appareils Android).
+ * Changements v1.0.5 :
+ * - Ajout du client ANDROID_TESTSUITE (fiable, pas de poToken).
+ * - Suppression de la probe fetch() (fausse confiance sur Android).
+ * - Retourne aussi urlAac (AAC/MP4) et urlCombined (vidéo+audio MP4)
+ *   comme options de secours progressives.
+ * - urlCombined = flux vidéo/mp4 combiné : ExoPlayer extrait l'audio,
+ *   utile quand les flux adaptifs audio-only ont des signatureCiphers.
  */
 export async function getAudioStream(videoId, { hifi = false } = {}) {
   let lastErr;
@@ -295,67 +320,81 @@ export async function getAudioStream(videoId, { hifi = false } = {}) {
         throw new Error(status);
       }
 
-      const formats = [
+      const allFormats = [
         ...(data?.streamingData?.adaptiveFormats || []),
         ...(data?.streamingData?.formats || []),
       ];
-      // Un flux sans `url` (signatureCipher) n'est pas lisible localement.
-      const audio = formats.filter(
+
+      // Flux audio-only avec URL directe (pas de signatureCipher).
+      const audioOnly = allFormats.filter(
         (f) => f.url && /audio\//i.test(f.mimeType || "")
       );
-      if (!audio.length) throw new Error("Aucun flux audio");
 
-      // Flux Opus/WebM (préféré : plus léger, ~64-96 kbps)
-      const opus = audio.filter((f) => /opus|webm/i.test(f.mimeType || ""));
-      // Flux AAC/MP4 (secours : universellement compatible Android)
-      const aac = audio.filter((f) => /mp4a|mp4|m4a/i.test(f.mimeType || ""));
+      // Flux combinés vidéo+audio MP4 avec URL directe (fallback ultime :
+      // ExoPlayer extrait l'audio nativement depuis un MP4).
+      const combined = allFormats.filter(
+        (f) => f.url && /video\/mp4/i.test(f.mimeType || "")
+      );
 
-      const opusSorted = [...opus].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
-      const aacSorted = [...aac].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
+      // Il faut au moins quelque chose de jouable.
+      if (!audioOnly.length && !combined.length) {
+        throw new Error("Aucun flux jouable (signatureCipher uniquement)");
+      }
 
-      // Sélection du meilleur Opus
-      const opusPool = opusSorted.length ? opusSorted : [];
-      const bestOpus = opusPool.length
-        ? hifi
-          ? opusPool[opusPool.length - 1]
-          : opusPool.find((f) => (f.bitrate || 0) >= 48000) || opusPool[0]
-        : null;
-
-      // Sélection du meilleur AAC (si disponible)
-      const bestAac = aacSorted.length
-        ? hifi
-          ? aacSorted[aacSorted.length - 1]
-          : aacSorted.find((f) => (f.bitrate || 0) >= 48000) || aacSorted[0]
-        : null;
-
-      // Si aucun Opus, utiliser AAC comme URL principale
-      const primary = bestOpus || bestAac;
-      if (!primary) throw new Error("Aucun flux audio utilisable");
-
-      setPreferredClient(client.id);
       const headers = streamHeaders(client.id);
       const details = data?.videoDetails || {};
       const thumbs = details.thumbnail?.thumbnails || [];
 
+      // ── Sélection du meilleur flux audio-only ──
+      const opus = audioOnly.filter((f) => /opus|webm/i.test(f.mimeType || ""));
+      const aac  = audioOnly.filter((f) => /mp4a|mp4|m4a/i.test(f.mimeType || ""));
+
+      const pickBest = (pool) => {
+        if (!pool.length) return null;
+        const sorted = [...pool].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
+        return hifi
+          ? sorted[sorted.length - 1]
+          : sorted.find((f) => (f.bitrate || 0) >= 48000) || sorted[0];
+      };
+
+      const bestOpus = pickBest(opus);
+      const bestAac  = pickBest(aac);
+      const primary  = bestOpus || bestAac;
+
+      // ── Sélection du meilleur flux combiné (secours) ──
+      const bestCombined = combined.length
+        ? [...combined].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0))[0]
+        : null;
+
+      // Utiliser le flux combiné comme primaire si aucun audio-only dispo.
+      const mainStream = primary || bestCombined;
+      const mainIsCombined = !primary;
+
+      setPreferredClient(client.id);
+
       return {
-        url: primary.url,
-        mime: primary.mimeType || "audio/webm",
-        // URL AAC de secours (null si absente ou si c'est déjà le primaire)
+        url: mainStream.url,
+        mime: mainStream.mimeType || "audio/webm",
+        isCombined: mainIsCombined,
+        // URL AAC de secours (si le primaire est WebM).
         urlAac: bestAac && bestAac !== primary ? bestAac.url : null,
         mimeAac: bestAac ? bestAac.mimeType : null,
+        // URL flux combiné de secours (si primaire est audio-only).
+        urlCombined: !mainIsCombined && bestCombined ? bestCombined.url : null,
         headers,
         client: client.id,
-        bitrate: primary.bitrate || 0,
+        bitrate: mainStream.bitrate || 0,
         title: details.title,
         author: details.author,
         thumbnail: thumbs[thumbs.length - 1]?.url || "",
         duration: Number(details.lengthSeconds || 0),
         videoUrl:
-          formats.find((f) => f.url && /video\//i.test(f.mimeType || ""))?.url || null,
+          allFormats.find((f) => f.url && /video\//i.test(f.mimeType || ""))?.url || null,
+        // Manifeste DASH (si disponible — ExoPlayer le lit nativement).
+        dashManifestUrl: data?.streamingData?.dashManifestUrl || null,
       };
     } catch (e) {
       lastErr = e;
-      // Ce client est grillé pour cette session : on ne le remet pas en tête.
       if (preferredClient === client.id) preferredClient = null;
     }
   }
@@ -371,29 +410,72 @@ export const estimateSizeMb = (bitrate, durationSec) =>
   (((bitrate || 64000) / 8) * (durationSec || 0)) / 1024 / 1024;
 
 /**
- * Repli le plus fiable sur Android : le manifeste HLS du client iOS.
- * ExoPlayer lit le m3u8 nativement et les segments ne sont pas liés à
- * l'User-Agent, ce qui élimine les 403 / erreurs -1005 de MediaPlayer.
+ * Manifeste HLS via client iOS — segments non liés à l'UA,
+ * ExoPlayer le lit nativement sans 403.
  */
 export async function getHlsStream(videoId) {
-  const client = CLIENTS.find((c) => c.id === "IOS") || CLIENTS[0];
-  const data = await innertube(
-    "player",
-    { videoId, contentCheckOk: true, racyCheckOk: true },
-    client
-  );
-  const url = data?.streamingData?.hlsManifestUrl;
-  if (!url) throw new Error("Aucun flux HLS");
-  const details = data?.videoDetails || {};
-  const thumbs = details.thumbnail?.thumbnails || [];
-  return {
-    url,
-    hls: true,
-    client: client.id,
-    bitrate: 0,
-    title: details.title,
-    author: details.author,
-    thumbnail: thumbs[thumbs.length - 1]?.url || "",
-    duration: Number(details.lengthSeconds || 0),
-  };
+  // Essayer plusieurs clients pour maximiser les chances d'obtenir un HLS.
+  const hlsClients = ["IOS", "ANDROID_TESTSUITE", "TVHTML5"];
+  let lastErr;
+  for (const id of hlsClients) {
+    const client = CLIENTS.find((c) => c.id === id);
+    if (!client) continue;
+    try {
+      const body = { videoId, contentCheckOk: true, racyCheckOk: true };
+      if (client.embed) body.thirdParty = { embedUrl: "https://www.youtube.com/" };
+      const data = await innertube("player", body, client);
+      const url = data?.streamingData?.hlsManifestUrl;
+      if (!url) { lastErr = new Error("Aucun flux HLS"); continue; }
+      const details = data?.videoDetails || {};
+      const thumbs = details.thumbnail?.thumbnails || [];
+      return {
+        url,
+        hls: true,
+        client: client.id,
+        bitrate: 0,
+        title: details.title,
+        author: details.author,
+        thumbnail: thumbs[thumbs.length - 1]?.url || "",
+        duration: Number(details.lengthSeconds || 0),
+      };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Aucun flux HLS");
+}
+
+/**
+ * Manifeste DASH via client IOS — alternative à HLS quand ce dernier
+ * n'est pas disponible. ExoPlayer supporte DASH nativement (MPD).
+ */
+export async function getDashStream(videoId) {
+  const dashClients = ["IOS", "ANDROID_TESTSUITE", "ANDROID_VR"];
+  let lastErr;
+  for (const id of dashClients) {
+    const client = CLIENTS.find((c) => c.id === id);
+    if (!client) continue;
+    try {
+      const data = await innertube(
+        "player",
+        { videoId, contentCheckOk: true, racyCheckOk: true },
+        client
+      );
+      const url = data?.streamingData?.dashManifestUrl;
+      if (!url) { lastErr = new Error("Aucun flux DASH"); continue; }
+      const details = data?.videoDetails || {};
+      return {
+        url,
+        dash: true,
+        client: client.id,
+        bitrate: 0,
+        title: details.title,
+        author: details.author,
+        duration: Number(details.lengthSeconds || 0),
+      };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Aucun flux DASH");
 }
