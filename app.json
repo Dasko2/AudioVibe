@@ -7,7 +7,9 @@
     "userInterfaceStyle": "dark",
     "scheme": "audiovibe",
     "icon": "./assets/icon.png",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "splash": {
       "image": "./assets/splash.png",
       "backgroundColor": "#0B0B14",
@@ -52,7 +54,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "00000000-0000-0000-0000-000000000000"
+        "projectId": "4514223d-1058-42a3-8672-8270d76cfdd9"
       }
     }
   }
