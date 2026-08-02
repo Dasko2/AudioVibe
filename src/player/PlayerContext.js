@@ -8,6 +8,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { Platform } from "react-native";
 
 import { addHistory, getDownload } from "../data/db";
 import { getAudioStream } from "../services/piped";
@@ -93,13 +94,42 @@ export function PlayerProvider({ children }) {
         br = stream.bitrate;
         headers = stream.headers;
       }
+      const source = headers
+        ? { uri, headers, overrideFileExtensionAndroid: "webm" }
+        : { uri };
+      let sound;
+      try {
+        ({ sound } = await Audio.Sound.createAsync(
+          source,
+          { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+          onStatus
+        ));
+      } catch (firstError) {
+        // ExoPlayer et fetch n'utilisent pas la même pile HTTP. Sur certains
+        // appareils, googlevideo accepte le probe puis refuse ExoPlayer. Une
+        // URL fraîche lue par MediaPlayer évite ce faux positif sans proxy.
+        if (offline?.uri || Platform.OS !== "android") throw firstError;
+        const fresh = await getAudioStream(track.id, {
+          hifi: !settings.dataSaver,
+        });
+        br = fresh.bitrate;
+        headers = fresh.headers;
+        uri = fresh.url;
+        ({ sound } = await Audio.Sound.createAsync(
+          {
+            uri,
+            headers,
+            overrideFileExtensionAndroid: "webm",
+          },
+          {
+            shouldPlay: true,
+            progressUpdateIntervalMillis: 500,
+            androidImplementation: "MediaPlayer",
+          },
+          onStatus
+        ));
+      }
       setBitrate(br);
-
-      const { sound } = await Audio.Sound.createAsync(
-        headers ? { uri, headers } : { uri },
-        { shouldPlay: true, progressUpdateIntervalMillis: 500 },
-        onStatus
-      );
       soundRef.current = sound;
       sound.setOnPlaybackStatusUpdate(onStatus);
       activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
