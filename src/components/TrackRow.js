@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
-import React from "react";
-import { Image, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import React, { useRef } from "react";
+import { Animated, Image, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { colors, font } from "../theme";
 
@@ -11,34 +11,47 @@ export const fmt = (s = 0) => {
 };
 
 export default function TrackRow({ track, onPress, onLongPress, right, active }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const spring = (to) =>
+    Animated.spring(scale, {
+      toValue: to,
+      useNativeDriver: true,
+      damping: 15,
+      stiffness: 240,
+      mass: 0.7,
+    }).start();
+
   return (
-    <TouchableOpacity
-      style={styles.row}
-      onPress={onPress}
-      onLongPress={onLongPress}
-      activeOpacity={0.7}
-    >
-      <Image
-        source={{ uri: track.thumbnail }}
-        style={styles.art}
-        resizeMode="cover"
-      />
-      <View style={styles.meta}>
-        <Text
-          numberOfLines={1}
-          style={[font.body, active && { color: colors.accent }]}
-        >
-          {track.title}
-        </Text>
-        <Text numberOfLines={1} style={font.muted}>
-          {track.author}
-          {track.duration ? ` · ${fmt(track.duration)}` : ""}
-        </Text>
-      </View>
-      {right ?? (
-        <Ionicons name="ellipsis-vertical" size={18} color={colors.textMuted} />
-      )}
-    </TouchableOpacity>
+    <Animated.View style={{ transform: [{ scale }] }}>
+      <Pressable
+        style={styles.row}
+        onPress={onPress}
+        onLongPress={onLongPress}
+        onPressIn={() => spring(0.97)}
+        onPressOut={() => spring(1)}
+      >
+        <Image
+          source={{ uri: track.thumbnail }}
+          style={styles.art}
+          resizeMode="cover"
+        />
+        <View style={styles.meta}>
+          <Text
+            numberOfLines={1}
+            style={[font.body, active && { color: colors.accent }]}
+          >
+            {track.title}
+          </Text>
+          <Text numberOfLines={1} style={font.muted}>
+            {track.author}
+            {track.duration ? ` · ${fmt(track.duration)}` : ""}
+          </Text>
+        </View>
+        {right ?? (
+          <Ionicons name="ellipsis-vertical" size={18} color={colors.textMuted} />
+        )}
+      </Pressable>
+    </Animated.View>
   );
 }
 

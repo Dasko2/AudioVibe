@@ -1,8 +1,11 @@
 import { Ionicons } from "@expo/vector-icons";
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Image,
+  Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -14,15 +17,64 @@ import { colors } from "../theme";
 
 export default function MiniPlayer() {
   const p = usePlayer();
-  if (!p?.current) return null;
+  const visible = !!p?.current;
 
-  const pct = p.duration ? (p.position / p.duration) * 100 : 0;
+  const slide = useRef(new Animated.Value(0)).current; // 0 caché, 1 visible
+  const scale = useRef(new Animated.Value(1)).current;
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(slide, {
+      toValue: visible ? 1 : 0,
+      useNativeDriver: true,
+      damping: 18,
+      stiffness: 160,
+      mass: 0.9,
+    }).start();
+  }, [visible, slide]);
+
+  const pct = p?.duration ? p.position / p.duration : 0;
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: pct,
+      duration: 550,
+      easing: Easing.linear,
+      useNativeDriver: false,
+    }).start();
+  }, [pct, progress]);
+
+  if (!visible) return null;
+
+  const press = (to) =>
+    Animated.spring(scale, {
+      toValue: to,
+      useNativeDriver: true,
+      damping: 14,
+      stiffness: 220,
+    }).start();
 
   return (
-    <View style={styles.wrap}>
-      <TouchableOpacity
+    <Animated.View
+      style={[
+        styles.wrap,
+        {
+          opacity: slide,
+          transform: [
+            {
+              translateY: slide.interpolate({
+                inputRange: [0, 1],
+                outputRange: [70, 0],
+              }),
+            },
+            { scale },
+          ],
+        },
+      ]}
+    >
+      <Pressable
         style={styles.bar}
-        activeOpacity={0.9}
+        onPressIn={() => press(0.97)}
+        onPressOut={() => press(1)}
         onPress={() => p.setExpanded(true)}
       >
         <Image source={{ uri: p.current.thumbnail }} style={styles.art} />
@@ -34,7 +86,12 @@ export default function MiniPlayer() {
             {p.error ? p.error : p.current.author}
           </Text>
         </View>
-        <TouchableOpacity onPress={p.toggle} hitSlop={12} style={styles.btn}>
+        <TouchableOpacity
+          onPress={p.toggle}
+          hitSlop={12}
+          activeOpacity={0.6}
+          style={styles.btn}
+        >
           {p.loading ? (
             <ActivityIndicator color={colors.text} />
           ) : (
@@ -45,14 +102,29 @@ export default function MiniPlayer() {
             />
           )}
         </TouchableOpacity>
-        <TouchableOpacity onPress={p.next} hitSlop={12} style={styles.btn}>
+        <TouchableOpacity
+          onPress={p.next}
+          hitSlop={12}
+          activeOpacity={0.6}
+          style={styles.btn}
+        >
           <Ionicons name="play-skip-forward" size={20} color={colors.text} />
         </TouchableOpacity>
-      </TouchableOpacity>
+      </Pressable>
       <View style={styles.track}>
-        <View style={[styles.fill, { width: `${pct}%` }]} />
+        <Animated.View
+          style={[
+            styles.fill,
+            {
+              width: progress.interpolate({
+                inputRange: [0, 1],
+                outputRange: ["0%", "100%"],
+              }),
+            },
+          ]}
+        />
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
