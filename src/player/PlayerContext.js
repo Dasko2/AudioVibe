@@ -79,6 +79,9 @@ export function PlayerProvider({ children }) {
 
       let uri;
       let br = 0;
+      // Les URL googlevideo sont liées au client qui les a demandées : sans
+      // ces en-têtes, ExoPlayer reçoit un 403 (InvalidResponseCodeException).
+      let headers;
       const offline = await getDownload(track.id);
       if (offline?.uri) {
         uri = offline.uri;
@@ -88,11 +91,12 @@ export function PlayerProvider({ children }) {
         });
         uri = stream.url;
         br = stream.bitrate;
+        headers = stream.headers;
       }
       setBitrate(br);
 
       const { sound } = await Audio.Sound.createAsync(
-        { uri },
+        headers ? { uri, headers } : { uri },
         { shouldPlay: true, progressUpdateIntervalMillis: 500 },
         onStatus
       );
