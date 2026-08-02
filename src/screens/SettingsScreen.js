@@ -23,7 +23,7 @@ import {
   importLibrary,
   setProfileName,
 } from "../data/db";
-import { INSTANCES, setPreferredInstance } from "../services/piped";
+import { CLIENT_LABELS, INSTANCES, setPreferredInstance } from "../services/piped";
 import { useSettings } from "../services/settings";
 import logo from "../../assets/logo.png";
 import { colors } from "../theme";
@@ -121,20 +121,22 @@ export default function SettingsScreen() {
           />
         </Row>
 
-        <Text style={styles.section}>Source (sans clé API)</Text>
+        <Text style={styles.section}>Extraction locale (sans clé API)</Text>
         {INSTANCES.map((i) => (
           <TouchableOpacity
             key={i}
             style={styles.instance}
+            activeOpacity={0.7}
             onPress={() => {
               setPreferredInstance(i);
-              Alert.alert("Instance prioritaire", i);
+              Alert.alert("Moteur prioritaire", CLIENT_LABELS[i] || i);
             }}
           >
-            <Ionicons name="server-outline" size={16} color={colors.textMuted} />
-            <Text style={styles.instanceText}>{i.replace("https://", "")}</Text>
+            <Ionicons name="phone-portrait-outline" size={16} color={colors.textMuted} />
+            <Text style={styles.instanceText}>{CLIENT_LABELS[i] || i}</Text>
           </TouchableOpacity>
         ))}
+
 
         <Text style={styles.section}>Sauvegarde</Text>
         <TouchableOpacity style={styles.btn} onPress={doExport}>
