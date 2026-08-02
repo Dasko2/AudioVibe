@@ -2,6 +2,7 @@
   "expo": {
     "name": "AudioVibe",
     "slug": "audiovibe",
+    "owner": "dasko20s-team",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
