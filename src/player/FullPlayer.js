@@ -1,7 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Image,
   Modal,
   Pressable,
@@ -22,14 +24,37 @@ export default function FullPlayer() {
   const p = usePlayer();
   const [fav, setFav] = useState(false);
   const [dl, setDl] = useState("idle");
+  const artScale = useRef(new Animated.Value(1)).current;
+  const progress = useRef(new Animated.Value(0)).current;
+  const playScale = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     if (p?.current) isFavorite(p.current.id).then(setFav);
     setDl("idle");
   }, [p?.current?.id]);
 
+  const pct = p?.duration ? p.position / p.duration : 0;
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: pct,
+      duration: 550,
+      easing: Easing.linear,
+      useNativeDriver: false,
+    }).start();
+  }, [pct, progress]);
+
+  useEffect(() => {
+    Animated.spring(artScale, {
+      toValue: p?.isPlaying ? 1 : 0.92,
+      useNativeDriver: true,
+      damping: 16,
+      stiffness: 130,
+      mass: 1,
+    }).start();
+  }, [p?.isPlaying, artScale]);
+
   if (!p?.current) return null;
-  const pct = p.duration ? (p.position / p.duration) * 100 : 0;
+
 
   const toggleFav = async () => {
     if (fav) await removeFavorite(p.current.id);
@@ -72,8 +97,12 @@ export default function FullPlayer() {
         </View>
 
         <View style={styles.artWrap}>
-          <Image source={{ uri: p.current.thumbnail }} style={styles.art} />
+          <Animated.Image
+            source={{ uri: p.current.thumbnail }}
+            style={[styles.art, { transform: [{ scale: artScale }] }]}
+          />
         </View>
+
 
         <View style={styles.info}>
           <Text numberOfLines={2} style={styles.title}>
@@ -98,7 +127,18 @@ export default function FullPlayer() {
           }}
         >
           <View style={styles.trackBg}>
-            <View style={[styles.trackFill, { width: `${pct}%` }]} />
+            <Animated.View
+              style={[
+                styles.trackFill,
+                {
+                  width: progress.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ["0%", "100%"],
+                  }),
+                },
+              ]}
+            />
+
           </View>
         </Pressable>
         <View style={styles.times}>
@@ -117,7 +157,28 @@ export default function FullPlayer() {
           <TouchableOpacity onPress={p.prev} hitSlop={12}>
             <Ionicons name="play-skip-back" size={34} color={colors.text} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={p.toggle} style={styles.playBtn}>
+          <Animated.View style={{ transform: [{ scale: playScale }] }}>
+          <Pressable
+            onPress={p.toggle}
+            onPressIn={() =>
+              Animated.spring(playScale, {
+                toValue: 0.9,
+                useNativeDriver: true,
+                damping: 14,
+                stiffness: 240,
+              }).start()
+            }
+            onPressOut={() =>
+              Animated.spring(playScale, {
+                toValue: 1,
+                useNativeDriver: true,
+                damping: 14,
+                stiffness: 240,
+              }).start()
+            }
+            style={styles.playBtn}
+          >
+
             {p.loading ? (
               <ActivityIndicator color="#000" />
             ) : (
@@ -127,7 +188,9 @@ export default function FullPlayer() {
                 color="#000"
               />
             )}
-          </TouchableOpacity>
+          </Pressable>
+          </Animated.View>
+
           <TouchableOpacity onPress={p.next} hitSlop={12}>
             <Ionicons name="play-skip-forward" size={34} color={colors.text} />
           </TouchableOpacity>
