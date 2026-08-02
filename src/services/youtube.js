@@ -243,12 +243,6 @@ export async function fetchPlaylist(urlOrId) {
   return { name, items: extractVideos(data) };
 }
 
-/**
- * Économie de données maximale : on ne garde que les flux audio-only
- * (Opus/WebM bas débit ~64-96 kbps => ~2 Mo pour 3-4 min).
- * On essaie chaque client local jusqu'à en trouver un qui rend un flux jouable
- * (ANDROID renvoie souvent UNPLAYABLE, ANDROID_VR / IOS / TV prennent le relais).
- */
 /** En-têtes exigés par googlevideo pour rejouer une URL : elle est liée au
  *  client (UA) qui l'a demandée. Sans eux ExoPlayer reçoit un 403. */
 export function streamHeaders(clientId) {
@@ -261,31 +255,17 @@ export function streamHeaders(clientId) {
   };
 }
 
-/** Vérifie que l'URL est réellement lisible (googlevideo renvoie parfois 403
- *  sur une URL pourtant présente dans la réponse player). */
-async function probe(url, headers, ms = 8000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      signal: ctrl.signal,
-      headers: { ...headers, Range: "bytes=0-1" },
-    });
-    // 200 (serveur ignorant Range) ou 206 = flux jouable.
-    return res.status === 200 || res.status === 206;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
- * Économie de données maximale : on ne garde que les flux audio-only
- * (Opus/WebM bas débit ~64-96 kbps => ~2 Mo pour 3-4 min).
- * On essaie chaque client local jusqu'à en trouver un dont l'URL répond
- * réellement (et non un 403 au moment de la lecture).
+ * Retourne les flux audio disponibles pour une vidéo (WebM/Opus ET AAC/MP4).
+ *
+ * Changement v1.0.4 : suppression du `probe` fetch.
+ * La probe fetch() ignorait le User-Agent (en-tête "interdit" en React Native
+ * Android), ce qui donnait une fausse confiance : l'URL répondait 206 au probe
+ * sans UA, mais ExoPlayer envoyait l'UA Oculus et recevait un 403 / -1005.
+ * On laisse désormais ExoPlayer décider directement.
+ *
+ * Retourne à la fois l'URL WebM/Opus préférée et, si disponible, une URL
+ * AAC/MP4 de secours (plus compatible avec certains appareils Android).
  */
 export async function getAudioStream(videoId, { hifi = false } = {}) {
   let lastErr;
@@ -325,36 +305,47 @@ export async function getAudioStream(videoId, { hifi = false } = {}) {
       );
       if (!audio.length) throw new Error("Aucun flux audio");
 
+      // Flux Opus/WebM (préféré : plus léger, ~64-96 kbps)
       const opus = audio.filter((f) => /opus|webm/i.test(f.mimeType || ""));
-      const pool = opus.length ? opus : audio;
-      const sorted = [...pool].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
+      // Flux AAC/MP4 (secours : universellement compatible Android)
+      const aac = audio.filter((f) => /mp4a|mp4|m4a/i.test(f.mimeType || ""));
 
-      const preferred = hifi
-        ? sorted[sorted.length - 1]
-        : sorted.find((f) => (f.bitrate || 0) >= 48000) || sorted[0];
+      const opusSorted = [...opus].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
+      const aacSorted = [...aac].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
 
-      // Ordre d'essai : le format voulu d'abord, puis les autres en secours.
-      const candidates = [preferred, ...sorted.filter((f) => f !== preferred)];
-      const headers = streamHeaders(client.id);
+      // Sélection du meilleur Opus
+      const opusPool = opusSorted.length ? opusSorted : [];
+      const bestOpus = opusPool.length
+        ? hifi
+          ? opusPool[opusPool.length - 1]
+          : opusPool.find((f) => (f.bitrate || 0) >= 48000) || opusPool[0]
+        : null;
 
-      let chosen = null;
-      for (const f of candidates) {
-        if (await probe(f.url, headers)) {
-          chosen = f;
-          break;
-        }
-      }
-      if (!chosen) throw new Error("403");
+      // Sélection du meilleur AAC (si disponible)
+      const bestAac = aacSorted.length
+        ? hifi
+          ? aacSorted[aacSorted.length - 1]
+          : aacSorted.find((f) => (f.bitrate || 0) >= 48000) || aacSorted[0]
+        : null;
+
+      // Si aucun Opus, utiliser AAC comme URL principale
+      const primary = bestOpus || bestAac;
+      if (!primary) throw new Error("Aucun flux audio utilisable");
 
       setPreferredClient(client.id);
+      const headers = streamHeaders(client.id);
       const details = data?.videoDetails || {};
       const thumbs = details.thumbnail?.thumbnails || [];
+
       return {
-        url: chosen.url,
+        url: primary.url,
+        mime: primary.mimeType || "audio/webm",
+        // URL AAC de secours (null si absente ou si c'est déjà le primaire)
+        urlAac: bestAac && bestAac !== primary ? bestAac.url : null,
+        mimeAac: bestAac ? bestAac.mimeType : null,
         headers,
         client: client.id,
-        bitrate: chosen.bitrate || 0,
-        mime: chosen.mimeType || "audio/webm",
+        bitrate: primary.bitrate || 0,
         title: details.title,
         author: details.author,
         thumbnail: thumbs[thumbs.length - 1]?.url || "",
@@ -378,3 +369,31 @@ export async function getAudioStream(videoId, { hifi = false } = {}) {
 
 export const estimateSizeMb = (bitrate, durationSec) =>
   (((bitrate || 64000) / 8) * (durationSec || 0)) / 1024 / 1024;
+
+/**
+ * Repli le plus fiable sur Android : le manifeste HLS du client iOS.
+ * ExoPlayer lit le m3u8 nativement et les segments ne sont pas liés à
+ * l'User-Agent, ce qui élimine les 403 / erreurs -1005 de MediaPlayer.
+ */
+export async function getHlsStream(videoId) {
+  const client = CLIENTS.find((c) => c.id === "IOS") || CLIENTS[0];
+  const data = await innertube(
+    "player",
+    { videoId, contentCheckOk: true, racyCheckOk: true },
+    client
+  );
+  const url = data?.streamingData?.hlsManifestUrl;
+  if (!url) throw new Error("Aucun flux HLS");
+  const details = data?.videoDetails || {};
+  const thumbs = details.thumbnail?.thumbnails || [];
+  return {
+    url,
+    hls: true,
+    client: client.id,
+    bitrate: 0,
+    title: details.title,
+    author: details.author,
+    thumbnail: thumbs[thumbs.length - 1]?.url || "",
+    duration: Number(details.lengthSeconds || 0),
+  };
+}
