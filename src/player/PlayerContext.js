@@ -11,7 +11,7 @@ import React, {
 import { Platform } from "react-native";
 
 import { addHistory, getDownload } from "../data/db";
-import { getAudioStream, getHlsStream } from "../services/piped";
+import { getAudioStream, getDashStream, getHlsStream } from "../services/piped";
 import { useSettings } from "../services/settings";
 
 const Ctx = createContext(null);
@@ -34,7 +34,6 @@ export function PlayerProvider({ children }) {
   const [bitrate, setBitrate] = useState(0);
   const [expanded, setExpanded] = useState(false);
 
-  // Background playback + lock-screen continuation (Android foreground audio).
   useEffect(() => {
     Audio.setAudioModeAsync({
       staysActiveInBackground: true,
@@ -43,7 +42,6 @@ export function PlayerProvider({ children }) {
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
       playThroughEarpieceAndroid: false,
     }).catch((e) => console.warn("[audio mode]", e?.message));
-
     return () => {
       soundRef.current?.unloadAsync().catch(() => {});
     };
@@ -52,12 +50,10 @@ export function PlayerProvider({ children }) {
   /**
    * loadFallbackRef — gestion des erreurs async d'ExoPlayer.
    *
-   * createAsync peut résoudre avec succès (objet Sound créé) puis ExoPlayer
-   * échoue asynchronement lors du premier buffering (403, -1005…). Dans ce
-   * cas expo-av appelle onStatus avec { isLoaded: false, error: "..." }.
-   *
-   * Ce ref stocke la prochaine stratégie de fallback à déclencher si onStatus
-   * reçoit une telle erreur. Il est vidé dès qu'une stratégie réussit.
+   * Quand createAsync réussit mais qu'ExoPlayer échoue lors du premier
+   * buffering (403, IO…), expo-av appelle onStatus avec
+   * { isLoaded: false, error: "..." }. Ce ref stocke la prochaine stratégie
+   * à déclencher automatiquement dans ce cas.
    */
   const loadFallbackRef = useRef(null);
 
@@ -65,20 +61,17 @@ export function PlayerProvider({ children }) {
     (status) => {
       if (!status?.isLoaded) {
         if (status?.error) {
-          // Erreur asynchrone (ex : ExoPlayer 403, -1005 IO error…).
-          // Si un fallback est enregistré, on l'exécute ; sinon, on affiche.
           const fallback = loadFallbackRef.current;
           loadFallbackRef.current = null;
           if (fallback) {
             fallback(status.error);
           } else {
-            setError(status.error);
+            setError("Lecture impossible pour ce titre");
             setIsPlaying(false);
           }
         }
         return;
       }
-      // Succès : plus besoin de fallback.
       loadFallbackRef.current = null;
       setPosition(status.positionMillis || 0);
       setDuration(status.durationMillis || 0);
@@ -100,13 +93,10 @@ export function PlayerProvider({ children }) {
   };
 
   /**
-   * Tente de créer un Sound depuis `source`.
-   * Si createAsync lève synchronement → throw (fallback chaîné appelant).
-   * Si ExoPlayer échoue de façon async → loadFallbackRef est appelé.
-   *
-   * On enregistre `nextFallback` AVANT createAsync de sorte que onStatus
-   * puisse le déclencher si nécessaire. Si createAsync lève lui-même,
-   * on retire le fallback (le catch de l'appelant prend la main).
+   * Tente de charger `source` via expo-av.
+   * - Enregistre `nextFallback` AVANT createAsync pour que onStatus puisse
+   *   le déclencher si ExoPlayer échoue de façon asynchrone.
+   * - Si createAsync lève de façon synchrone, retire le fallback et relance.
    */
   const trySource = useCallback(
     async (source, options, nextFallback) => {
@@ -119,7 +109,6 @@ export function PlayerProvider({ children }) {
           onStatus
         ));
       } catch (e) {
-        // Erreur synchrone : le fallback async n'est plus utile.
         loadFallbackRef.current = null;
         throw e;
       }
@@ -137,120 +126,38 @@ export function PlayerProvider({ children }) {
       await soundRef.current?.unloadAsync().catch(() => {});
       soundRef.current = null;
 
-      // ── Fichier téléchargé ────────────────────────────────────────────────
+      // ── Fichier téléchargé localement ────────────────────────────────────
       const offline = await getDownload(track.id);
       if (offline?.uri) {
         const sound = await trySource({ uri: offline.uri }, {}, null);
-        setBitrate(0);
-        soundRef.current = sound;
-        sound.setOnPlaybackStatusUpdate(onStatus);
-        activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
-        addHistory(track).catch(() => {});
+        finalize(sound, 0);
         return;
       }
 
-      // ── Récupération des URLs (sans probe — le probe fetch() ignorait l'UA
-      //    sur Android, donnant une fausse confiance ; ExoPlayer décide seul).
+      // ── Récupération des URLs InnerTube ──────────────────────────────────
+      // Pas de probe fetch() : fausse confiance sur Android (l'UA est ignoré
+      // par fetch mais ExoPlayer l'envoie → 403).
       const stream = await getAudioStream(track.id, { hifi: !settings.dataSaver });
-      const { url: urlWebm, urlAac, headers } = stream;
 
-      // ── Stratégie 1 (Android) : HLS via client iOS ────────────────────────
-      // m3u8 non lié à l'User-Agent → ExoPlayer le lit sans 403 ni -1005.
-      let sound = null;
-      let br = 0;
+      /**
+       * Chaîne de fallback (du plus fiable au moins fiable sur Android) :
+       *
+       *  1. HLS  (m3u8 iOS/TESTSUITE — segments non liés à l'UA)
+       *  2. DASH (mpd — idem, ExoPlayer natif)
+       *  3. WebM/Opus + headers + overrideExt:"webm"
+       *  4. AAC/MP4 + headers  (format plus universel Android)
+       *  5. Flux combiné vidéo+audio MP4 (ExoPlayer extrait l'audio)
+       *  6. WebM sans overrideExt (ExoPlayer détecte via Content-Type)
+       *  7. Erreur finale propre
+       *
+       * Sur iOS : démarre à l'étape 3 (HLS/DASH gérés différemment par AVPlayer).
+       */
 
-      const tryHls = async (nextFn) => {
-        try {
-          const hls = await getHlsStream(track.id);
-          return await trySource(
-            { uri: hls.url, overrideFileExtensionAndroid: "m3u8" },
-            {},
-            nextFn
-          );
-        } catch {
-          return null;
-        }
-      };
+      const { url: urlWebm, urlAac, urlCombined, headers, dashManifestUrl } = stream;
 
-      // ── Définir la chaîne de fallback async (de la fin vers le début) ─────
-      //
-      // Chaîne (Android) :
-      //   HLS → WebM+headers → AAC+headers → WebM sans overrideExt → erreur
-      //
-      // Chaîne (iOS) :
-      //   WebM+headers → AAC+headers → WebM sans overrideExt → erreur
-
-      // Fallback final commun : message clair si tout a échoué.
-      const fallbackFinal = (errMsg) => {
-        setError("Lecture impossible pour ce titre");
-        setIsPlaying(false);
-        setLoading(false);
-      };
-
-      // Fallback 4 : WebM sans overrideFileExtensionAndroid (laisse ExoPlayer
-      // détecter le format depuis le Content-Type de la réponse).
-      const fallback4 = async (_err) => {
-        try {
-          sound = await trySource(
-            { uri: urlWebm, headers },
-            {},
-            fallbackFinal
-          );
-          finalize(sound, stream.bitrate);
-        } catch {
-          fallbackFinal();
-        }
-      };
-
-      // Fallback 3 : AAC/MP4 + ExoPlayer + headers (format plus universel
-      // sur Android, pas besoin de overrideFileExtensionAndroid pour MP4).
-      const fallback3 = async (_err) => {
-        if (!urlAac) return fallback4(_err);
-        try {
-          sound = await trySource(
-            { uri: urlAac, headers },
-            {},
-            fallback4
-          );
-          finalize(sound, 0);
-        } catch {
-          return fallback4(_err);
-        }
-      };
-
-      // Fallback 2 : WebM + ExoPlayer + headers + overrideFileExtensionAndroid
-      const fallback2 = async (_err) => {
-        try {
-          sound = await trySource(
-            { uri: urlWebm, headers, overrideFileExtensionAndroid: "webm" },
-            {},
-            fallback3
-          );
-          finalize(sound, stream.bitrate);
-        } catch {
-          return fallback3(_err);
-        }
-      };
-
-      // Fallback 1 (iOS seulement, cas où la stratégie primaire WebM échoue) :
-      // AAC/MP4 direct.
-      const fallbackIosAac = async (_err) => {
-        if (!urlAac) return fallback4(_err);
-        try {
-          sound = await trySource(
-            { uri: urlAac, headers },
-            {},
-            fallback4
-          );
-          finalize(sound, 0);
-        } catch {
-          return fallback4(_err);
-        }
-      };
-
-      // Helper d'enregistrement final (appelé quand un source réussit).
-      const finalize = (s, bitrateVal) => {
-        setBitrate(bitrateVal || 0);
+      // ── helper de finalisation ───────────────────────────────────────────
+      const finalize = (s, br) => {
+        setBitrate(br || 0);
         soundRef.current = s;
         s.setOnPlaybackStatusUpdate(onStatus);
         activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
@@ -258,36 +165,126 @@ export function PlayerProvider({ children }) {
         setLoading(false);
       };
 
-      if (Platform.OS === "android") {
-        // ── Android : HLS en premier ──────────────────────────────────────
-        sound = await tryHls(fallback2);
-        if (sound) {
-          finalize(sound, 0);
-          return;
-        }
-        // HLS a échoué synchronement → tenter WebM + headers
+      // ── Fallbacks (définition de la fin vers le début) ───────────────────
+
+      // Étape 7 : échec total
+      const step7 = (_err) => {
+        setError("Lecture impossible pour ce titre");
+        setIsPlaying(false);
+        setLoading(false);
+      };
+
+      // Étape 6 : WebM sans overrideFileExtensionAndroid
+      const step6 = async (_err) => {
+        if (!urlWebm) return step7(_err);
         try {
-          sound = await trySource(
+          const s = await trySource({ uri: urlWebm, headers }, {}, step7);
+          finalize(s, stream.bitrate);
+        } catch {
+          step7();
+        }
+      };
+
+      // Étape 5 : flux combiné vidéo+audio MP4
+      const step5 = async (_err) => {
+        if (!urlCombined) return step6(_err);
+        try {
+          const s = await trySource(
+            { uri: urlCombined, headers, overrideFileExtensionAndroid: "mp4" },
+            {},
+            step6
+          );
+          finalize(s, 0);
+        } catch {
+          return step6(_err);
+        }
+      };
+
+      // Étape 4 : AAC/MP4 audio-only + headers
+      const step4 = async (_err) => {
+        if (!urlAac) return step5(_err);
+        try {
+          const s = await trySource({ uri: urlAac, headers }, {}, step5);
+          finalize(s, 0);
+        } catch {
+          return step5(_err);
+        }
+      };
+
+      // Étape 3 : WebM/Opus + headers + overrideFileExtensionAndroid:"webm"
+      const step3 = async (_err) => {
+        if (!urlWebm) return step4(_err);
+        try {
+          const s = await trySource(
             { uri: urlWebm, headers, overrideFileExtensionAndroid: "webm" },
             {},
-            fallback3
+            step4
           );
-          finalize(sound, stream.bitrate);
+          finalize(s, stream.bitrate);
         } catch {
-          // createAsync synchrone échoué → enchaîner fallback3
-          await fallback3(null);
+          return step4(_err);
         }
-      } else {
-        // ── iOS : WebM + headers en premier ──────────────────────────────
+      };
+
+      // Étape 2 : DASH manifest
+      const step2 = async (_err) => {
+        // Utiliser le dashManifestUrl déjà récupéré si disponible,
+        // sinon appeler getDashStream.
+        let dashUrl = dashManifestUrl;
+        if (!dashUrl) {
+          try {
+            const dash = await getDashStream(track.id);
+            dashUrl = dash.url;
+          } catch {
+            dashUrl = null;
+          }
+        }
+        if (!dashUrl) return step3(_err);
         try {
-          sound = await trySource(
-            { uri: urlWebm, headers },
+          const s = await trySource(
+            { uri: dashUrl, overrideFileExtensionAndroid: "mpd" },
             {},
-            fallbackIosAac
+            step3
           );
-          finalize(sound, stream.bitrate);
+          finalize(s, 0);
         } catch {
-          await fallbackIosAac(null);
+          return step3(_err);
+        }
+      };
+
+      // Étape 1 : HLS manifest (Android en premier, iOS via AVPlayer natif)
+      const step1 = async () => {
+        let hlsUrl = null;
+        try {
+          const hls = await getHlsStream(track.id);
+          hlsUrl = hls.url;
+        } catch {
+          hlsUrl = null;
+        }
+        if (!hlsUrl) return step2(null);
+        try {
+          const s = await trySource(
+            { uri: hlsUrl, overrideFileExtensionAndroid: "m3u8" },
+            {},
+            step2
+          );
+          finalize(s, 0);
+        } catch {
+          return step2(null);
+        }
+      };
+
+      if (Platform.OS === "android") {
+        // Android : HLS → DASH → WebM → AAC → Combined → WebM(no override)
+        await step1();
+      } else {
+        // iOS : WebM → AAC → HLS → DASH → Combined → erreur
+        // (AVPlayer gère mieux les URL directes que les manifestes sur certaines versions)
+        try {
+          const s = await trySource({ uri: urlWebm, headers }, {}, step4);
+          finalize(s, stream.bitrate);
+        } catch {
+          await step4(null);
         }
       }
     } catch (e) {
@@ -295,10 +292,16 @@ export function PlayerProvider({ children }) {
       setIsPlaying(false);
       setLoading(false);
     } finally {
-      // setLoading(false) est appelé dans finalize() ou ici en cas d'erreur.
-      // On s'assure qu'il est toujours false à la sortie.
       setLoading(false);
     }
+  };
+
+  // ── Définir finalize à l'extérieur pour les fichiers offline ────────────
+  const finalize = (s, br) => {
+    setBitrate(br || 0);
+    soundRef.current = s;
+    s.setOnPlaybackStatusUpdate(onStatus);
+    activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
   };
 
   const playIndex = async (i) => {
