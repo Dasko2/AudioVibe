@@ -9,10 +9,12 @@ import {
   CLIENTS,
   fetchPlaylist,
   getAudioStream,
+  getHlsStream,
   searchTracks,
   setPreferredClient,
   trending,
   estimateSizeMb,
+  streamHeaders,
 } from "./youtube";
 
 const CACHE_KEY = "audiovibe.client";
@@ -38,4 +40,12 @@ export async function setPreferredInstance(id) {
   } catch {}
 }
 
-export { fetchPlaylist, getAudioStream, searchTracks, trending, estimateSizeMb };
+export {
+  fetchPlaylist,
+  getAudioStream,
+  getHlsStream,
+  searchTracks,
+  trending,
+  estimateSizeMb,
+  streamHeaders,
+};
