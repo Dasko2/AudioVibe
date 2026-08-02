@@ -51,7 +51,15 @@ export function PlayerProvider({ children }) {
 
   const onStatus = useCallback(
     (status) => {
-      if (!status?.isLoaded) return;
+      if (!status?.isLoaded) {
+        // Propager les erreurs asynchrones de lecture (ex : -1005 MediaPlayer,
+        // 403 ExoPlayer) qui surviennent après la résolution de createAsync.
+        if (status?.error) {
+          setError(status.error);
+          setIsPlaying(false);
+        }
+        return;
+      }
       setPosition(status.positionMillis || 0);
       setDuration(status.durationMillis || 0);
       setIsPlaying(status.isPlaying);
@@ -78,66 +86,98 @@ export function PlayerProvider({ children }) {
       await soundRef.current?.unloadAsync().catch(() => {});
       soundRef.current = null;
 
-      let uri;
-      let br = 0;
-      // Les URL googlevideo sont liées au client qui les a demandées : sans
-      // ces en-têtes, ExoPlayer reçoit un 403 (InvalidResponseCodeException).
-      let headers;
       const offline = await getDownload(track.id);
       if (offline?.uri) {
-        uri = offline.uri;
-      } else {
-        const stream = await getAudioStream(track.id, {
-          hifi: !settings.dataSaver,
-        });
-        uri = stream.url;
-        br = stream.bitrate;
-        headers = stream.headers;
-      }
-      const source = headers
-        ? { uri, headers, overrideFileExtensionAndroid: "webm" }
-        : { uri };
-      let sound;
-      try {
-        ({ sound } = await Audio.Sound.createAsync(
-          source,
+        // Fichier téléchargé localement — lecture directe.
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: offline.uri },
           { shouldPlay: true, progressUpdateIntervalMillis: 500 },
           onStatus
-        ));
-      } catch (firstError) {
-        // ExoPlayer et fetch n'utilisent pas la même pile HTTP : googlevideo
-        // peut accepter le probe puis refuser ExoPlayer (403), et MediaPlayer
-        // échoue souvent en -1005. Le manifeste HLS du client iOS n'est lié à
-        // aucun User-Agent : ExoPlayer le lit nativement.
-        if (offline?.uri) throw firstError;
+        );
+        setBitrate(0);
+        soundRef.current = sound;
+        sound.setOnPlaybackStatusUpdate(onStatus);
+        activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
+        addHistory(track).catch(() => {});
+        return;
+      }
+
+      let sound = null;
+      let br = 0;
+
+      // ── Stratégie 1 (Android) : HLS via client iOS ───────────────────────
+      // Le manifest m3u8 n'est lié à aucun User-Agent : ExoPlayer le lit
+      // nativement sans 403 ni erreur -1005.
+      if (Platform.OS === "android") {
         try {
           const hls = await getHlsStream(track.id);
-          uri = hls.url;
-          br = 0;
           ({ sound } = await Audio.Sound.createAsync(
-            { uri, overrideFileExtensionAndroid: "m3u8" },
+            { uri: hls.url, overrideFileExtensionAndroid: "m3u8" },
             { shouldPlay: true, progressUpdateIntervalMillis: 500 },
             onStatus
           ));
-        } catch (hlsError) {
-          if (Platform.OS !== "android") throw hlsError;
-          const fresh = await getAudioStream(track.id, {
-            hifi: !settings.dataSaver,
-          });
-          br = fresh.bitrate;
-          headers = fresh.headers;
-          uri = fresh.url;
-          ({ sound } = await Audio.Sound.createAsync(
-            { uri, headers, overrideFileExtensionAndroid: "webm" },
-            {
-              shouldPlay: true,
-              progressUpdateIntervalMillis: 500,
-              androidImplementation: "MediaPlayer",
-            },
-            onStatus
-          ));
+          br = 0;
+        } catch {
+          sound = null;
         }
       }
+
+      // ── Stratégie 2 : WebM/Opus via ExoPlayer + en-têtes ─────────────────
+      // (principal sur iOS, fallback sur Android si HLS a échoué)
+      if (!sound) {
+        let headers;
+        try {
+          const stream = await getAudioStream(track.id, {
+            hifi: !settings.dataSaver,
+          });
+          br = stream.bitrate;
+          headers = stream.headers;
+          // Les URL googlevideo sont liées au client qui les a demandées :
+          // on passe les en-têtes pour qu'ExoPlayer ne reçoive pas un 403.
+          ({ sound } = await Audio.Sound.createAsync(
+            { uri: stream.url, headers, overrideFileExtensionAndroid: "webm" },
+            { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+            onStatus
+          ));
+        } catch (exoError) {
+          sound = null;
+
+          // ── Stratégie 3 (Android uniquement) : HLS de secours ──────────
+          // Si ce n'est pas déjà la plateforme Android, on s'arrête ici.
+          if (Platform.OS !== "android") throw exoError;
+
+          try {
+            const hls = await getHlsStream(track.id);
+            ({ sound } = await Audio.Sound.createAsync(
+              { uri: hls.url, overrideFileExtensionAndroid: "m3u8" },
+              { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+              onStatus
+            ));
+            br = 0;
+          } catch {
+            sound = null;
+          }
+
+          // ── Stratégie 4 (Android uniquement) : MediaPlayer sans en-têtes ─
+          // Dernier recours : certaines URL googlevideo passent directement
+          // quand on retire les en-têtes personnalisés (la signature est dans
+          // l'URL elle-même).
+          if (!sound) {
+            const fresh = await getAudioStream(track.id, { hifi: false });
+            br = fresh.bitrate;
+            ({ sound } = await Audio.Sound.createAsync(
+              { uri: fresh.url, overrideFileExtensionAndroid: "webm" },
+              {
+                shouldPlay: true,
+                progressUpdateIntervalMillis: 500,
+                androidImplementation: "MediaPlayer",
+              },
+              onStatus
+            ));
+          }
+        }
+      }
+
       setBitrate(br);
       soundRef.current = sound;
       sound.setOnPlaybackStatusUpdate(onStatus);
