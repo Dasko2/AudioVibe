@@ -1,3 +1,17 @@
+/**
+ * AudioVibe v1.0.7 — PlayerContext
+ *
+ * Extraction via Cobalt → Piped → InnerTube (sans hébergement, sans clé API).
+ *
+ * Chaîne de fallback par source :
+ *   1. Fichier local (téléchargé)
+ *   2. HLS manifest  (le plus robuste sur Android)
+ *   3. urlBest       (meilleure URL directe retournée)
+ *   4. urlWebm       (Opus/WebM + overrideFileExtensionAndroid)
+ *   5. urlM4a        (AAC/MP4, format universel Android)
+ *   6. Erreur finale
+ */
+
 import { Audio, InterruptionModeAndroid } from "expo-av";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import React, {
@@ -8,30 +22,27 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Platform } from "react-native";
 
 import { addHistory, getDownload } from "../data/db";
-import { getAudioStream, getDashStream, getHlsStream } from "../services/piped";
-import { useSettings } from "../services/settings";
+import { getAudioStream } from "../services/piped";
 
 const Ctx = createContext(null);
 export const usePlayer = () => useContext(Ctx);
 
 export function PlayerProvider({ children }) {
-  const { settings } = useSettings();
   const soundRef = useRef(null);
   const queueRef = useRef([]);
 
-  const [current, setCurrent] = useState(null);
-  const [queue, setQueue] = useState([]);
-  const [index, setIndex] = useState(-1);
+  const [current, setCurrent]   = useState(null);
+  const [queue, setQueue]       = useState([]);
+  const [index, setIndex]       = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading]   = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [repeat, setRepeat] = useState("off"); // off | one | all
-  const [error, setError] = useState(null);
-  const [bitrate, setBitrate] = useState(0);
+  const [repeat, setRepeat]     = useState("off"); // off | one | all
+  const [error, setError]       = useState(null);
+  const [bitrate, setBitrate]   = useState(0);
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
@@ -42,18 +53,14 @@ export function PlayerProvider({ children }) {
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
       playThroughEarpieceAndroid: false,
     }).catch((e) => console.warn("[audio mode]", e?.message));
-    return () => {
-      soundRef.current?.unloadAsync().catch(() => {});
-    };
+    return () => { soundRef.current?.unloadAsync().catch(() => {}); };
   }, []);
 
   /**
-   * loadFallbackRef — gestion des erreurs async d'ExoPlayer.
-   *
-   * Quand createAsync réussit mais qu'ExoPlayer échoue lors du premier
-   * buffering (403, IO…), expo-av appelle onStatus avec
-   * { isLoaded: false, error: "..." }. Ce ref stocke la prochaine stratégie
-   * à déclencher automatiquement dans ce cas.
+   * loadFallbackRef — gère les erreurs async d'ExoPlayer.
+   * Si createAsync réussit mais qu'ExoPlayer échoue pendant le buffering
+   * (403, IO…), expo-av appelle onStatus({ isLoaded: false, error }).
+   * Ce ref stocke la prochaine stratégie à déclencher automatiquement.
    */
   const loadFallbackRef = useRef(null);
 
@@ -68,6 +75,7 @@ export function PlayerProvider({ children }) {
           } else {
             setError("Lecture impossible pour ce titre");
             setIsPlaying(false);
+            setLoading(false);
           }
         }
         return;
@@ -78,25 +86,22 @@ export function PlayerProvider({ children }) {
       setIsPlaying(status.isPlaying);
       if (status.didJustFinish && !status.isLooping) handleFinish();
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [repeat, index]
   );
 
   const handleFinish = () => {
     const q = queueRef.current;
-    if (repeat === "one") {
-      soundRef.current?.replayAsync().catch(() => {});
-      return;
-    }
+    if (repeat === "one") { soundRef.current?.replayAsync().catch(() => {}); return; }
     if (index < q.length - 1) return playIndex(index + 1);
     if (repeat === "all" && q.length) return playIndex(0);
     setIsPlaying(false);
   };
 
   /**
-   * Tente de charger `source` via expo-av.
-   * - Enregistre `nextFallback` AVANT createAsync pour que onStatus puisse
-   *   le déclencher si ExoPlayer échoue de façon asynchrone.
-   * - Si createAsync lève de façon synchrone, retire le fallback et relance.
+   * trySource — charge une URL via expo-av.
+   * Enregistre nextFallback AVANT createAsync pour que onStatus puisse
+   * le déclencher si ExoPlayer échoue de façon asynchrone.
    */
   const trySource = useCallback(
     async (source, options, nextFallback) => {
@@ -122,11 +127,20 @@ export function PlayerProvider({ children }) {
     setError(null);
     loadFallbackRef.current = null;
 
+    const finalize = (s, br = 0) => {
+      setBitrate(br);
+      soundRef.current = s;
+      s.setOnPlaybackStatusUpdate(onStatus);
+      activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
+      addHistory(track).catch(() => {});
+      setLoading(false);
+    };
+
     try {
       await soundRef.current?.unloadAsync().catch(() => {});
       soundRef.current = null;
 
-      // ── Fichier téléchargé localement ────────────────────────────────────
+      // ── 0. Fichier local ─────────────────────────────────────────────────
       const offline = await getDownload(track.id);
       if (offline?.uri) {
         const sound = await trySource({ uri: offline.uri }, {}, null);
@@ -134,133 +148,67 @@ export function PlayerProvider({ children }) {
         return;
       }
 
-      // ── Récupération des URLs InnerTube ──────────────────────────────────
-      // Pas de probe fetch() : fausse confiance sur Android (l'UA est ignoré
-      // par fetch mais ExoPlayer l'envoie → 403).
-      const stream = await getAudioStream(track.id, { hifi: !settings.dataSaver });
-
-      /**
-       * Chaîne de fallback (du plus fiable au moins fiable sur Android) :
-       *
-       *  1. HLS  (m3u8 iOS/TESTSUITE — segments non liés à l'UA)
-       *  2. DASH (mpd — idem, ExoPlayer natif)
-       *  3. WebM/Opus + headers + overrideExt:"webm"
-       *  4. AAC/MP4 + headers  (format plus universel Android)
-       *  5. Flux combiné vidéo+audio MP4 (ExoPlayer extrait l'audio)
-       *  6. WebM sans overrideExt (ExoPlayer détecte via Content-Type)
-       *  7. Erreur finale propre
-       *
-       * Sur iOS : démarre à l'étape 3 (HLS/DASH gérés différemment par AVPlayer).
-       */
-
-      const { url: urlWebm, urlAac, urlCombined, headers, dashManifestUrl } = stream;
-
-      // ── helper de finalisation ───────────────────────────────────────────
-      const finalize = (s, br) => {
-        setBitrate(br || 0);
-        soundRef.current = s;
-        s.setOnPlaybackStatusUpdate(onStatus);
-        activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
-        addHistory(track).catch(() => {});
+      // ── 1. Extraction distante (Cobalt → Piped → InnerTube) ─────────────
+      let stream;
+      try {
+        stream = await getAudioStream(track.id);
+      } catch (fetchErr) {
+        setError(`Impossible de récupérer ce titre (${fetchErr.message})`);
         setLoading(false);
-      };
+        return;
+      }
 
-      // ── Fallbacks (définition de la fin vers le début) ───────────────────
+      const { hlsUrl, urlBest, urlWebm, urlM4a } = stream;
 
-      // Étape 7 : échec total
-      const step7 = (_err) => {
+      // ── Chaîne de fallback ───────────────────────────────────────────────
+
+      // Étape 5 : erreur finale
+      const step5 = (_err) => {
         setError("Lecture impossible pour ce titre");
         setIsPlaying(false);
         setLoading(false);
       };
 
-      // Étape 6 : WebM sans overrideFileExtensionAndroid
-      const step6 = async (_err) => {
-        if (!urlWebm) return step7(_err);
-        try {
-          const s = await trySource({ uri: urlWebm, headers }, {}, step7);
-          finalize(s, stream.bitrate);
-        } catch {
-          step7();
-        }
-      };
-
-      // Étape 5 : flux combiné vidéo+audio MP4
-      const step5 = async (_err) => {
-        if (!urlCombined) return step6(_err);
-        try {
-          const s = await trySource(
-            { uri: urlCombined, headers, overrideFileExtensionAndroid: "mp4" },
-            {},
-            step6
-          );
-          finalize(s, 0);
-        } catch {
-          return step6(_err);
-        }
-      };
-
-      // Étape 4 : AAC/MP4 audio-only + headers
+      // Étape 4 : M4A/AAC direct
       const step4 = async (_err) => {
-        if (!urlAac) return step5(_err);
+        if (!urlM4a || urlM4a === urlBest) return step5(_err);
         try {
-          const s = await trySource({ uri: urlAac, headers }, {}, step5);
+          const s = await trySource({ uri: urlM4a }, {}, step5);
           finalize(s, 0);
-        } catch {
-          return step5(_err);
-        }
+        } catch { step5(_err); }
       };
 
-      // Étape 3 : WebM/Opus + headers + overrideFileExtensionAndroid:"webm"
+      // Étape 3 : WebM/Opus + overrideFileExtensionAndroid
       const step3 = async (_err) => {
-        if (!urlWebm) return step4(_err);
+        if (!urlWebm || urlWebm === urlBest) return step4(_err);
         try {
           const s = await trySource(
-            { uri: urlWebm, headers, overrideFileExtensionAndroid: "webm" },
+            { uri: urlWebm, overrideFileExtensionAndroid: "webm" },
             {},
             step4
           );
-          finalize(s, stream.bitrate);
-        } catch {
-          return step4(_err);
-        }
+          finalize(s, 0);
+        } catch { return step4(_err); }
       };
 
-      // Étape 2 : DASH manifest
+      // Étape 2 : meilleure URL directe (Cobalt renvoie souvent un tunnel audio)
       const step2 = async (_err) => {
-        // Utiliser le dashManifestUrl déjà récupéré si disponible,
-        // sinon appeler getDashStream.
-        let dashUrl = dashManifestUrl;
-        if (!dashUrl) {
-          try {
-            const dash = await getDashStream(track.id);
-            dashUrl = dash.url;
-          } catch {
-            dashUrl = null;
-          }
-        }
-        if (!dashUrl) return step3(_err);
+        if (!urlBest) return step3(_err);
+        // Cobalt renvoie souvent une URL opaque sans extension → forcer mp4
+        // Piped/InnerTube : deviner à partir du contenu
+        const ext = urlBest.includes(".webm") ? "webm" : "mp4";
         try {
           const s = await trySource(
-            { uri: dashUrl, overrideFileExtensionAndroid: "mpd" },
+            { uri: urlBest, overrideFileExtensionAndroid: ext },
             {},
             step3
           );
           finalize(s, 0);
-        } catch {
-          return step3(_err);
-        }
+        } catch { return step3(_err); }
       };
 
-      // Étape 1 : HLS manifest (Android en premier, iOS via AVPlayer natif)
+      // Étape 1 : HLS manifest (plus robuste — segments courts, pas de header UA)
       const step1 = async () => {
-        let hlsUrl = null;
-        try {
-          const hls = await getHlsStream(track.id);
-          hlsUrl = hls.url;
-        } catch {
-          hlsUrl = null;
-        }
         if (!hlsUrl) return step2(null);
         try {
           const s = await trySource(
@@ -269,77 +217,47 @@ export function PlayerProvider({ children }) {
             step2
           );
           finalize(s, 0);
-        } catch {
-          return step2(null);
-        }
+        } catch { return step2(null); }
       };
 
-      if (Platform.OS === "android") {
-        // Android : HLS → DASH → WebM → AAC → Combined → WebM(no override)
-        await step1();
-      } else {
-        // iOS : WebM → AAC → HLS → DASH → Combined → erreur
-        // (AVPlayer gère mieux les URL directes que les manifestes sur certaines versions)
-        try {
-          const s = await trySource({ uri: urlWebm, headers }, {}, step4);
-          finalize(s, stream.bitrate);
-        } catch {
-          await step4(null);
-        }
-      }
+      await step1();
+
     } catch (e) {
-      setError(e?.message || "Lecture impossible");
-      setIsPlaying(false);
-      setLoading(false);
-    } finally {
+      console.error("[loadTrack]", e);
+      setError("Erreur inattendue lors de la lecture");
       setLoading(false);
     }
   };
 
-  // ── Définir finalize à l'extérieur pour les fichiers offline ────────────
-  const finalize = (s, br) => {
-    setBitrate(br || 0);
-    soundRef.current = s;
-    s.setOnPlaybackStatusUpdate(onStatus);
-    activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
-  };
-
   const playIndex = async (i) => {
     const q = queueRef.current;
-    if (!q[i]) return;
+    if (i < 0 || i >= q.length) return;
     setIndex(i);
     setCurrent(q[i]);
     await loadTrack(q[i]);
   };
 
-  const playTrack = async (track, list) => {
-    const q = list && list.length ? list : [track];
-    queueRef.current = q;
-    setQueue(q);
-    const i = Math.max(
-      0,
-      q.findIndex((t) => t.id === track.id)
-    );
-    await playIndex(i);
+  const playTrack = async (track, newQueue = null) => {
+    if (newQueue) {
+      queueRef.current = newQueue;
+      setQueue(newQueue);
+      const i = newQueue.findIndex((t) => t.id === track.id);
+      setIndex(i >= 0 ? i : 0);
+    }
+    setCurrent(track);
+    await loadTrack(track);
   };
 
   const toggle = async () => {
-    const s = soundRef.current;
-    if (!s) return;
-    const st = await s.getStatusAsync();
-    if (st.isPlaying) {
-      await s.pauseAsync();
-      deactivateKeepAwake("audiovibe-playback").catch(() => {});
-    } else {
-      await s.playAsync();
-      activateKeepAwakeAsync("audiovibe-playback").catch(() => {});
-    }
+    if (!soundRef.current) return;
+    if (isPlaying) await soundRef.current.pauseAsync().catch(() => {});
+    else           await soundRef.current.playAsync().catch(() => {});
   };
 
-  const next = () => {
+  const next = async () => {
     const q = queueRef.current;
-    if (index < q.length - 1) playIndex(index + 1);
-    else if (repeat === "all" && q.length) playIndex(0);
+    if (index < q.length - 1) return playIndex(index + 1);
+    if (repeat === "all") return playIndex(0);
   };
 
   const prev = async () => {
@@ -350,12 +268,8 @@ export function PlayerProvider({ children }) {
     if (index > 0) playIndex(index - 1);
   };
 
-  const seek = async (ms) => {
-    await soundRef.current?.setPositionAsync(ms).catch(() => {});
-  };
-
-  const cycleRepeat = () =>
-    setRepeat((r) => (r === "off" ? "all" : r === "all" ? "one" : "off"));
+  const seek  = async (ms) => { await soundRef.current?.setPositionAsync(ms).catch(() => {}); };
+  const cycleRepeat = () => setRepeat((r) => r === "off" ? "all" : r === "all" ? "one" : "off");
 
   const stop = async () => {
     await soundRef.current?.unloadAsync().catch(() => {});
@@ -368,25 +282,14 @@ export function PlayerProvider({ children }) {
   return (
     <Ctx.Provider
       value={{
-        current,
-        queue,
-        index,
-        isPlaying,
-        loading,
-        position,
-        duration,
-        repeat,
-        error,
-        bitrate,
-        expanded,
-        setExpanded,
-        playTrack,
-        toggle,
-        next,
-        prev,
-        seek,
-        cycleRepeat,
-        stop,
+        current, queue, index,
+        isPlaying, loading,
+        position, duration,
+        repeat, error, bitrate,
+        expanded, setExpanded,
+        playTrack, toggle,
+        next, prev, seek,
+        cycleRepeat, stop,
       }}
     >
       {children}
