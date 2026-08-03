@@ -1,26 +1,23 @@
 /**
- * Compatibilité : l'application importait auparavant les instances Piped.
- * L'extraction est désormais 100 % locale (voir ./youtube.js) — plus aucune
- * instance publique externe. Ce module ne fait que ré-exporter la nouvelle API.
+ * AudioVibe v1.0.7 — ré-exporte youtube.js (Cobalt → Piped → InnerTube)
  */
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import {
   CLIENTS,
+  estimateSizeMb,
   fetchPlaylist,
   getAudioStream,
   getDashStream,
   getHlsStream,
   searchTracks,
   setPreferredClient,
-  trending,
-  estimateSizeMb,
   streamHeaders,
+  trending,
 } from "./youtube";
 
 const CACHE_KEY = "audiovibe.client";
 
-/** Liste des moteurs d'extraction locaux (affichés dans les paramètres). */
 export const INSTANCES = CLIENTS.map((c) => c.id);
 export const CLIENT_LABELS = Object.fromEntries(CLIENTS.map((c) => [c.id, c.label]));
 
@@ -42,12 +39,12 @@ export async function setPreferredInstance(id) {
 }
 
 export {
+  estimateSizeMb,
   fetchPlaylist,
   getAudioStream,
   getDashStream,
   getHlsStream,
   searchTracks,
-  trending,
-  estimateSizeMb,
   streamHeaders,
+  trending,
 };

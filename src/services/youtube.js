@@ -1,481 +1,232 @@
 /**
- * Extraction audio 100 % locale (embarquée dans le téléphone).
- * Aucune instance Piped/Invidious, aucun serveur tiers, aucune clé API privée :
- * on parle directement au endpoint InnerTube public de YouTube depuis l'appareil,
- * exactement comme le fait l'application YouTube Android.
- */
-
-const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
-const BASE = "https://www.youtube.com/youtubei/v1";
-
-/** Clients InnerTube utilisés localement, par ordre de préférence.
+ * AudioVibe v1.0.7 — extraction audio sans hébergement, sans clé API
  *
- *  v1.0.5 : ajout ANDROID_TESTSUITE (pas de poToken, URLs directes fiables),
- *  WEB_EMBEDDED_PLAYER (fonctionne pour les vidéos embarquables).
- *  Les anciens clients restent en fallback.
+ * Stratégie :
+ *   1. Cobalt.tools  — API publique gratuite, bien maintenue
+ *   2. Piped         — plusieurs instances publiques en fallback
+ *   3. InnerTube     — extraction locale de dernier recours (ANDROID_TESTSUITE)
  */
-export const CLIENTS = [
-  {
-    id: "ANDROID_TESTSUITE",
-    label: "Android Test Suite",
-    context: {
-      clientName: "ANDROID_TESTSUITE",
-      clientVersion: "1.9",
-      androidSdkVersion: 34,
-      osName: "Android",
-      osVersion: "14",
-      hl: "fr",
-    },
-    ua: "com.google.android.youtube/1.9 (Linux; U; Android 14) gzip",
-    clientNameHeader: "30",
-  },
-  {
-    id: "ANDROID_VR",
-    label: "Android VR (local)",
-    context: {
-      clientName: "ANDROID_VR",
-      clientVersion: "1.61.43",
-      deviceMake: "Oculus",
-      deviceModel: "Quest 3",
-      androidSdkVersion: 32,
-      osName: "Android",
-      osVersion: "12L",
-      hl: "fr",
-    },
-    ua: "com.google.android.apps.youtube.vr.oculus/1.61.43 (Linux; U; Android 12L) gzip",
-    clientNameHeader: "28",
-  },
-  {
-    id: "IOS",
-    label: "iOS (local)",
-    context: {
-      clientName: "IOS",
-      clientVersion: "20.10.4",
-      deviceMake: "Apple",
-      deviceModel: "iPhone16,2",
-      osName: "iPhone",
-      osVersion: "18.3.2.22D82",
-      hl: "fr",
-    },
-    ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)",
-    clientNameHeader: "5",
-  },
-  {
-    id: "TVHTML5",
-    label: "TV intégrée (local)",
-    context: {
-      clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-      clientVersion: "2.0",
-      hl: "fr",
-    },
-    ua: "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
-    clientNameHeader: "85",
-    embed: true,
-  },
-  {
-    id: "WEB_EMBEDDED",
-    label: "Web Embedded",
-    context: {
-      clientName: "WEB_EMBEDDED_PLAYER",
-      clientVersion: "2.20240401.00.00",
-      hl: "fr",
-    },
-    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-    clientNameHeader: "56",
-    embed: true,
-  },
-  {
-    id: "ANDROID",
-    label: "Android (local)",
-    context: {
-      clientName: "ANDROID",
-      clientVersion: "19.44.38",
-      androidSdkVersion: 30,
-      osName: "Android",
-      osVersion: "11",
-      hl: "fr",
-    },
-    ua: "com.google.android.youtube/19.44.38 (Linux; U; Android 11) gzip",
-    clientNameHeader: "3",
-  },
-  {
-    id: "WEB",
-    label: "Web (local)",
-    context: {
-      clientName: "WEB",
-      clientVersion: "2.20240401.00.00",
-      hl: "fr",
-    },
-    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-    clientNameHeader: "1",
-  },
-];
 
+/* ─── Cobalt ─────────────────────────────────────────────────── */
 
-let preferredClient = null;
-export function setPreferredClient(id) {
-  preferredClient = id;
-}
-export function getPreferredClient() {
-  return preferredClient;
-}
+const COBALT_API = "https://api.cobalt.tools";
+const COBALT_TIMEOUT = 12_000;
 
-function orderedClients() {
-  if (!preferredClient) return CLIENTS;
-  const first = CLIENTS.filter((c) => c.id === preferredClient);
-  return [...first, ...CLIENTS.filter((c) => c.id !== preferredClient)];
-}
-
-async function innertube(endpoint, body, client, { region = "FR", ms = 12000 } = {}) {
+async function cobaltStream(videoId) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
+  const timer = setTimeout(() => ctrl.abort(), COBALT_TIMEOUT);
   try {
-    const res = await fetch(`${BASE}/${endpoint}?key=${INNERTUBE_KEY}&prettyPrint=false`, {
+    const res = await fetch(COBALT_API, {
       method: "POST",
       signal: ctrl.signal,
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": client.ua,
-        "X-YouTube-Client-Name": client.clientNameHeader,
-        "X-YouTube-Client-Version": client.context.clientVersion,
-        Origin: "https://www.youtube.com",
+        Accept: "application/json",
       },
       body: JSON.stringify({
-        context: {
-          client: { ...client.context, gl: region },
-          user: { lockedSafetyMode: false },
-        },
-        ...body,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        downloadMode: "audio",
+        audioFormat: "best",
+        filenameStyle: "basic",
       }),
     });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    return await res.json();
+    if (!res.ok) throw new Error(`Cobalt HTTP ${res.status}`);
+    const data = await res.json();
+    // status: "stream" | "redirect" | "tunnel" | "error" | "picker"
+    if (data.status === "error") throw new Error(data.error?.code || "Cobalt error");
+    const url = data.url;
+    if (!url) throw new Error("Cobalt: pas d'URL");
+    return { urlBest: url, urlWebm: null, urlM4a: null, hlsUrl: null, from: "cobalt" };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function anyClient(endpoint, body, opts) {
+/* ─── Piped ──────────────────────────────────────────────────── */
+
+/** Instances Piped publiques, essayées dans l'ordre */
+const PIPED_INSTANCES = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.tokhmi.xyz",
+  "https://api.piped.projectsegfau.lt",
+  "https://piped-api.garudalinux.org",
+  "https://pa.il.ax",
+];
+const PIPED_TIMEOUT = 12_000;
+
+async function pipedStream(videoId) {
   let lastErr;
-  for (const client of orderedClients()) {
+  for (const base of PIPED_INSTANCES) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PIPED_TIMEOUT);
     try {
-      const data = await innertube(endpoint, body, client, opts);
-      return { data, client };
+      const res = await fetch(`${base}/streams/${videoId}`, { signal: ctrl.signal });
+      if (!res.ok) { lastErr = new Error(`Piped ${base} HTTP ${res.status}`); continue; }
+      const data = await res.json();
+
+      /** audioStreams : [{ url, quality, mimeType, codec, bitrate, contentLength }] */
+      const streams = (data.audioStreams || []).filter((s) => s.url);
+      if (!streams.length) { lastErr = new Error("Piped: aucun flux audio"); continue; }
+
+      // Préférer opus/webm, sinon m4a
+      const sortByBitrate = (arr) => [...arr].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      const webmStreams = sortByBitrate(streams.filter((s) => s.mimeType?.includes("webm") || s.codec?.includes("opus")));
+      const m4aStreams  = sortByBitrate(streams.filter((s) => s.mimeType?.includes("mp4")  || s.codec?.includes("mp4a")));
+      const bestStream  = sortByBitrate(streams)[0];
+
+      return {
+        urlBest: bestStream?.url  || null,
+        urlWebm: webmStreams[0]?.url || null,
+        urlM4a:  m4aStreams[0]?.url  || null,
+        hlsUrl:  data.hls            || null,
+        from: "piped",
+      };
     } catch (e) {
       lastErr = e;
+    } finally {
+      clearTimeout(timer);
     }
   }
-  throw new Error(
-    "Extraction locale impossible (" + (lastErr?.message || "réseau") + ")"
-  );
+  throw lastErr || new Error("Piped: toutes les instances ont échoué");
 }
 
-/* ---------- parsing ---------- */
+/* ─── InnerTube (dernier recours) ────────────────────────────── */
 
-function collect(node, key, out = []) {
-  if (!node || typeof node !== "object") return out;
-  if (Array.isArray(node)) {
-    for (const n of node) collect(n, key, out);
-    return out;
-  }
-  for (const k of Object.keys(node)) {
-    if (k === key && node[k] && typeof node[k] === "object") out.push(node[k]);
-    else collect(node[k], key, out);
-  }
-  return out;
-}
+const INNERTUBE_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w";
+const BASE = "https://www.youtube.com/youtubei/v1";
 
-const textOf = (t) =>
-  t?.simpleText ||
-  (Array.isArray(t?.runs) ? t.runs.map((r) => r.text).join("") : "") ||
-  "";
+const TESTSUITE_CLIENT = {
+  id: "ANDROID_TESTSUITE",
+  context: { clientName: "ANDROID_TESTSUITE", clientVersion: "1.9", androidSdkVersion: 34, osName: "Android", osVersion: "14", hl: "fr" },
+  ua: "com.google.android.youtube/1.9 (Linux; U; Android 14) gzip",
+};
 
-function durationToSec(str = "") {
-  const parts = String(str).split(":").map((n) => parseInt(n, 10));
-  if (parts.some(isNaN) || !parts.length) return 0;
-  return parts.reduce((acc, n) => acc * 60 + n, 0);
-}
-
-function mapRenderer(v) {
-  const id = v.videoId;
-  if (!id) return null;
-  const thumbs = v.thumbnail?.thumbnails || [];
-  return {
-    id,
-    title: textOf(v.title) || "Sans titre",
-    author:
-      textOf(v.ownerText) ||
-      textOf(v.longBylineText) ||
-      textOf(v.shortBylineText) ||
-      "",
-    thumbnail: thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-    duration:
-      durationToSec(textOf(v.lengthText)) ||
-      Number(v.lengthSeconds || 0) ||
-      0,
-  };
-}
-
-function extractVideos(data) {
-  const nodes = [
-    ...collect(data, "videoRenderer"),
-    ...collect(data, "compactVideoRenderer"),
-    ...collect(data, "playlistVideoRenderer"),
-    ...collect(data, "gridVideoRenderer"),
-  ];
-  const seen = new Set();
-  const out = [];
-  for (const n of nodes) {
-    const t = mapRenderer(n);
-    if (t && !seen.has(t.id)) {
-      seen.add(t.id);
-      out.push(t);
-    }
-  }
-  return out;
-}
-
-/* ---------- API publique ---------- */
-
-export async function searchTracks(query) {
-  const { data } = await anyClient("search", {
-    query,
-    params: "EgIQAQ%3D%3D",
-  });
-  const list = extractVideos(data);
-  if (list.length) return list;
-  const retry = await anyClient("search", { query });
-  return extractVideos(retry.data);
-}
-
-export async function trending(region = "FR") {
+async function innertubeStream(videoId) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
   try {
-    const { data } = await anyClient("browse", { browseId: "FEtrending" }, { region });
-    const list = extractVideos(data).filter((t) => t.duration > 0);
-    if (list.length) return list;
-  } catch {}
-  return searchTracks("top hits musique " + region);
-}
-
-/** Accepte une URL complète de playlist YouTube ou un id brut. */
-export async function fetchPlaylist(urlOrId) {
-  const m = String(urlOrId).match(/list=([A-Za-z0-9_-]+)/);
-  const id = m ? m[1] : String(urlOrId).trim();
-  const browseId = id.startsWith("VL") ? id : "VL" + id;
-  const { data } = await anyClient("browse", { browseId });
-  const name =
-    textOf(data?.header?.playlistHeaderRenderer?.title) ||
-    textOf(data?.metadata?.playlistMetadataRenderer?.title) ||
-    "Playlist importée";
-  return { name, items: extractVideos(data) };
-}
-
-/** En-têtes exigés par googlevideo pour rejouer une URL liée au client. */
-export function streamHeaders(clientId) {
-  const c = CLIENTS.find((x) => x.id === clientId) || CLIENTS[0];
-  return {
-    "User-Agent": c.ua,
-    Origin: "https://www.youtube.com",
-    Referer: "https://www.youtube.com/",
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-  };
-}
-
-/**
- * Retourne les flux audio disponibles pour une vidéo.
- *
- * Changements v1.0.5 :
- * - Ajout du client ANDROID_TESTSUITE (fiable, pas de poToken).
- * - Suppression de la probe fetch() (fausse confiance sur Android).
- * - Retourne aussi urlAac (AAC/MP4) et urlCombined (vidéo+audio MP4)
- *   comme options de secours progressives.
- * - urlCombined = flux vidéo/mp4 combiné : ExoPlayer extrait l'audio,
- *   utile quand les flux adaptifs audio-only ont des signatureCiphers.
- */
-export async function getAudioStream(videoId, { hifi = false } = {}) {
-  let lastErr;
-  let lastReason;
-  for (const client of orderedClients()) {
-    try {
-      const body = {
+    const res = await fetch(`${BASE}/player?key=${INNERTUBE_KEY}&prettyPrint=false`, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", "User-Agent": TESTSUITE_CLIENT.ua, "X-YouTube-Client-Name": "30", "X-YouTube-Client-Version": "1.9" },
+      body: JSON.stringify({
+        context: { client: TESTSUITE_CLIENT.context },
         videoId,
         contentCheckOk: true,
         racyCheckOk: true,
-        playbackContext: {
-          contentPlaybackContext: { html5Preference: "HTML5_PREF_WANTS" },
-        },
-      };
-      if (client.embed) {
-        body.thirdParty = { embedUrl: "https://www.youtube.com/" };
-      }
-      const data = await innertube("player", body, client);
+      }),
+    });
+    if (!res.ok) throw new Error(`InnerTube HTTP ${res.status}`);
+    const data = await res.json();
 
-      const status = data?.playabilityStatus?.status;
-      const reason =
-        textOf(data?.playabilityStatus?.reason) ||
-        data?.playabilityStatus?.reason ||
-        "";
-      if (status && status !== "OK") {
-        lastReason = reason || status;
-        throw new Error(status);
-      }
+    const formats = [...(data?.streamingData?.adaptiveFormats || []), ...(data?.streamingData?.formats || [])];
+    const audioOnly = formats.filter((f) => f.url && f.mimeType?.startsWith("audio/"));
 
-      const allFormats = [
-        ...(data?.streamingData?.adaptiveFormats || []),
-        ...(data?.streamingData?.formats || []),
-      ];
+    const webm = audioOnly.filter((f) => f.mimeType?.includes("webm")).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    const m4a  = audioOnly.filter((f) => f.mimeType?.includes("mp4")).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+    const best = audioOnly.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
-      // Flux audio-only avec URL directe (pas de signatureCipher).
-      const audioOnly = allFormats.filter(
-        (f) => f.url && /audio\//i.test(f.mimeType || "")
-      );
+    if (!best) throw new Error("InnerTube: aucun flux direct (signatureCipher uniquement)");
 
-      // Flux combinés vidéo+audio MP4 avec URL directe (fallback ultime :
-      // ExoPlayer extrait l'audio nativement depuis un MP4).
-      const combined = allFormats.filter(
-        (f) => f.url && /video\/mp4/i.test(f.mimeType || "")
-      );
-
-      // Il faut au moins quelque chose de jouable.
-      if (!audioOnly.length && !combined.length) {
-        throw new Error("Aucun flux jouable (signatureCipher uniquement)");
-      }
-
-      const headers = streamHeaders(client.id);
-      const details = data?.videoDetails || {};
-      const thumbs = details.thumbnail?.thumbnails || [];
-
-      // ── Sélection du meilleur flux audio-only ──
-      const opus = audioOnly.filter((f) => /opus|webm/i.test(f.mimeType || ""));
-      const aac  = audioOnly.filter((f) => /mp4a|mp4|m4a/i.test(f.mimeType || ""));
-
-      const pickBest = (pool) => {
-        if (!pool.length) return null;
-        const sorted = [...pool].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0));
-        return hifi
-          ? sorted[sorted.length - 1]
-          : sorted.find((f) => (f.bitrate || 0) >= 48000) || sorted[0];
-      };
-
-      const bestOpus = pickBest(opus);
-      const bestAac  = pickBest(aac);
-      const primary  = bestOpus || bestAac;
-
-      // ── Sélection du meilleur flux combiné (secours) ──
-      const bestCombined = combined.length
-        ? [...combined].sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0))[0]
-        : null;
-
-      // Utiliser le flux combiné comme primaire si aucun audio-only dispo.
-      const mainStream = primary || bestCombined;
-      const mainIsCombined = !primary;
-
-      setPreferredClient(client.id);
-
-      return {
-        url: mainStream.url,
-        mime: mainStream.mimeType || "audio/webm",
-        isCombined: mainIsCombined,
-        // URL AAC de secours (si le primaire est WebM).
-        urlAac: bestAac && bestAac !== primary ? bestAac.url : null,
-        mimeAac: bestAac ? bestAac.mimeType : null,
-        // URL flux combiné de secours (si primaire est audio-only).
-        urlCombined: !mainIsCombined && bestCombined ? bestCombined.url : null,
-        headers,
-        client: client.id,
-        bitrate: mainStream.bitrate || 0,
-        title: details.title,
-        author: details.author,
-        thumbnail: thumbs[thumbs.length - 1]?.url || "",
-        duration: Number(details.lengthSeconds || 0),
-        videoUrl:
-          allFormats.find((f) => f.url && /video\//i.test(f.mimeType || ""))?.url || null,
-        // Manifeste DASH (si disponible — ExoPlayer le lit nativement).
-        dashManifestUrl: data?.streamingData?.dashManifestUrl || null,
-      };
-    } catch (e) {
-      lastErr = e;
-      if (preferredClient === client.id) preferredClient = null;
-    }
+    return {
+      urlBest: best?.url  || null,
+      urlWebm: webm?.url  || null,
+      urlM4a:  m4a?.url   || null,
+      hlsUrl:  data?.streamingData?.hlsManifestUrl || null,
+      from: "innertube",
+    };
+  } finally {
+    clearTimeout(timer);
   }
-  throw new Error(
-    "Lecture impossible pour ce titre (" +
-      (lastReason || lastErr?.message || "réseau") +
-      ")"
-  );
 }
 
-
-export const estimateSizeMb = (bitrate, durationSec) =>
-  (((bitrate || 64000) / 8) * (durationSec || 0)) / 1024 / 1024;
+/* ─── API publique principale ────────────────────────────────── */
 
 /**
- * Manifeste HLS via client iOS — segments non liés à l'UA,
- * ExoPlayer le lit nativement sans 403.
+ * getAudioStream — essaie Cobalt → Piped → InnerTube
+ * Retourne : { urlBest, urlWebm, urlM4a, hlsUrl, from }
  */
+export async function getAudioStream(videoId) {
+  const errors = [];
+
+  // 1. Cobalt
+  try { return await cobaltStream(videoId); }
+  catch (e) { errors.push(`cobalt: ${e.message}`); }
+
+  // 2. Piped (plusieurs instances)
+  try { return await pipedStream(videoId); }
+  catch (e) { errors.push(`piped: ${e.message}`); }
+
+  // 3. InnerTube local (dernier recours)
+  try { return await innertubeStream(videoId); }
+  catch (e) { errors.push(`innertube: ${e.message}`); }
+
+  throw new Error(`Toutes les sources ont échoué :\n${errors.join("\n")}`);
+}
+
+/** Alias HLS — tente d'abord Piped (retourne toujours hlsUrl) puis Cobalt */
 export async function getHlsStream(videoId) {
-  // Essayer plusieurs clients pour maximiser les chances d'obtenir un HLS.
-  const hlsClients = ["IOS", "ANDROID_TESTSUITE", "TVHTML5"];
-  let lastErr;
-  for (const id of hlsClients) {
-    const client = CLIENTS.find((c) => c.id === id);
-    if (!client) continue;
-    try {
-      const body = { videoId, contentCheckOk: true, racyCheckOk: true };
-      if (client.embed) body.thirdParty = { embedUrl: "https://www.youtube.com/" };
-      const data = await innertube("player", body, client);
-      const url = data?.streamingData?.hlsManifestUrl;
-      if (!url) { lastErr = new Error("Aucun flux HLS"); continue; }
-      const details = data?.videoDetails || {};
-      const thumbs = details.thumbnail?.thumbnails || [];
-      return {
-        url,
-        hls: true,
-        client: client.id,
-        bitrate: 0,
-        title: details.title,
-        author: details.author,
-        thumbnail: thumbs[thumbs.length - 1]?.url || "",
-        duration: Number(details.lengthSeconds || 0),
-      };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error("Aucun flux HLS");
+  // Piped a souvent un manifest HLS
+  try {
+    const s = await pipedStream(videoId);
+    if (s.hlsUrl) return { url: s.hlsUrl, hls: true };
+  } catch {}
+  throw new Error("Aucun flux HLS disponible");
 }
 
-/**
- * Manifeste DASH via client IOS — alternative à HLS quand ce dernier
- * n'est pas disponible. ExoPlayer supporte DASH nativement (MPD).
- */
-export async function getDashStream(videoId) {
-  const dashClients = ["IOS", "ANDROID_TESTSUITE", "ANDROID_VR"];
+/** Non utilisé mais gardé pour compatibilité d'import */
+export async function getDashStream() {
+  throw new Error("DASH non supporté dans ce mode");
+}
+
+/* ─── Recherche & tendances via Piped ───────────────────────── */
+
+async function pipedFetch(path) {
   let lastErr;
-  for (const id of dashClients) {
-    const client = CLIENTS.find((c) => c.id === id);
-    if (!client) continue;
+  for (const base of PIPED_INSTANCES) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10_000);
     try {
-      const data = await innertube(
-        "player",
-        { videoId, contentCheckOk: true, racyCheckOk: true },
-        client
-      );
-      const url = data?.streamingData?.dashManifestUrl;
-      if (!url) { lastErr = new Error("Aucun flux DASH"); continue; }
-      const details = data?.videoDetails || {};
-      return {
-        url,
-        dash: true,
-        client: client.id,
-        bitrate: 0,
-        title: details.title,
-        author: details.author,
-        duration: Number(details.lengthSeconds || 0),
-      };
+      const res = await fetch(`${base}${path}`, { signal: ctrl.signal });
+      if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+      return await res.json();
     } catch (e) {
       lastErr = e;
+    } finally {
+      clearTimeout(timer);
     }
   }
-  throw lastErr || new Error("Aucun flux DASH");
+  throw lastErr || new Error("Piped: toutes les instances ont échoué");
 }
+
+export async function searchTracks(query) {
+  const data = await pipedFetch(`/search?q=${encodeURIComponent(query)}&filter=music_songs`);
+  return (data.items || []).filter((i) => i.type === "stream").map(normalizePiped);
+}
+
+export async function trending() {
+  const data = await pipedFetch("/trending?region=FR");
+  return (data || []).filter((i) => i.type === "stream").slice(0, 30).map(normalizePiped);
+}
+
+function normalizePiped(item) {
+  const thumb = item.thumbnail || item.thumbnailUrl || "";
+  return {
+    id:        (item.url || "").replace("/watch?v=", "") || item.id || "",
+    title:     item.title || "Titre inconnu",
+    artist:    item.uploaderName || item.uploader || "",
+    duration:  item.duration || 0,
+    thumbnail: thumb,
+  };
+}
+
+/* ─── Utilitaires ────────────────────────────────────────────── */
+
+export function estimateSizeMb(durationSec) {
+  return Math.round((durationSec * 128) / 8 / 1024 * 10) / 10;
+}
+export const streamHeaders = {};
+export const CLIENTS = [{ id: "AUTO", label: "Cobalt → Piped → InnerTube" }];
+export function setPreferredClient() {}
+export function getPreferredClient() { return "AUTO"; }
+export function fetchPlaylist() { return Promise.reject(new Error("Non supporté")); }
