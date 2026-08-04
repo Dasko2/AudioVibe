@@ -3,7 +3,7 @@
     "name": "AudioVibe",
     "slug": "audiovibe",
     "owner": "dasko20s-team",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "scheme": "audiovibe",
@@ -16,7 +16,7 @@
     },
     "android": {
       "package": "com.audiovibe.app",
-      "versionCode": 2,
+      "versionCode": 3,
       "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -53,7 +53,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "4514223d-1058-42a3-8672-8270d76cfdd9"
+        "projectId": "4bb5825f-1660-46c6-8b46-0fb60ab7fa79"
       }
     }
   }
