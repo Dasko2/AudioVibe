@@ -200,13 +200,150 @@ async function pipedFetch(path) {
 }
 
 export async function searchTracks(query) {
-  const data = await pipedFetch(`/search?q=${encodeURIComponent(query)}&filter=music_songs`);
-  return (data.items || []).filter((i) => i.type === "stream").map(normalizePiped);
+  // Piped search
+  try {
+    const data = await pipedFetch(`/search?q=${encodeURIComponent(query)}&filter=music_songs`);
+    const items = (data.items || []).filter((i) => i.type === "stream").map(normalizePiped);
+    if (items.length) return items;
+  } catch {}
+  // Fallback : InnerTube search
+  return innertubeSearch(query);
 }
 
+/** Tendances — InnerTube browse en priorité, Piped en fallback, [] si tout échoue */
 export async function trending() {
-  const data = await pipedFetch("/trending?region=FR");
-  return (data || []).filter((i) => i.type === "stream").slice(0, 30).map(normalizePiped);
+  // 1. InnerTube browse (music trending)
+  try {
+    const results = await innertubeTrending();
+    if (results.length) return results;
+  } catch {}
+  // 2. Piped trending (souvent 410 mais on essaie quand même)
+  try {
+    const data = await pipedFetch("/trending?region=FR");
+    const items = (data || []).filter((i) => i.type === "stream").slice(0, 30).map(normalizePiped);
+    if (items.length) return items;
+  } catch {}
+  // 3. Retourne tableau vide silencieusement — pas d'erreur affichée
+  return [];
+}
+
+async function innertubeTrending() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const res = await fetch(`${BASE}/browse?key=${INNERTUBE_KEY}&prettyPrint=false`, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": TESTSUITE_CLIENT.ua,
+        "X-YouTube-Client-Name": "30",
+        "X-YouTube-Client-Version": "1.9",
+      },
+      body: JSON.stringify({
+        context: { client: TESTSUITE_CLIENT.context },
+        browseId: "FEtrending",
+        // paramètre pour l'onglet "Musique"
+        params: "4gIuKhQSEmVuLUZSMmZRd1cySGlzSkFZFSoIc3RyZWFtcw==",
+      }),
+    });
+    if (!res.ok) throw new Error(`InnerTube browse HTTP ${res.status}`);
+    const data = await res.json();
+
+    // Parcourir les sections de la réponse pour extraire les vidéos
+    const contents =
+      data?.contents?.sectionListRenderer?.contents ||
+      data?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]
+        ?.tabRenderer?.content?.sectionListRenderer?.contents || [];
+
+    const videos = [];
+    for (const section of contents) {
+      const items =
+        section?.itemSectionRenderer?.contents ||
+        section?.musicShelfRenderer?.contents || [];
+      for (const item of items) {
+        const video =
+          item?.compactVideoRenderer ||
+          item?.musicTwoRowItemRenderer ||
+          item?.videoRenderer;
+        if (!video) continue;
+        const videoId =
+          video.videoId ||
+          video.navigationEndpoint?.watchEndpoint?.videoId;
+        if (!videoId) continue;
+        const title =
+          video.title?.runs?.[0]?.text ||
+          video.title?.simpleText ||
+          video.headline?.runs?.[0]?.text || "";
+        const artist =
+          video.shortBylineText?.runs?.[0]?.text ||
+          video.longBylineText?.runs?.[0]?.text || "";
+        const thumb =
+          video.thumbnail?.thumbnails?.at(-1)?.url ||
+          video.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails?.at(-1)?.url || "";
+        const dur =
+          video.lengthText?.simpleText || video.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0]?.text || "";
+        videos.push({ id: videoId, title, artist, duration: parseDuration(dur), thumbnail: thumb });
+        if (videos.length >= 30) break;
+      }
+      if (videos.length >= 30) break;
+    }
+    return videos;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseDuration(str) {
+  if (!str) return 0;
+  const parts = str.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
+}
+
+async function innertubeSearch(query) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const res = await fetch(`${BASE}/search?key=${INNERTUBE_KEY}&prettyPrint=false`, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": TESTSUITE_CLIENT.ua,
+        "X-YouTube-Client-Name": "30",
+        "X-YouTube-Client-Version": "1.9",
+      },
+      body: JSON.stringify({
+        context: { client: TESTSUITE_CLIENT.context },
+        query,
+        params: "EgIQAQ==", // filtre : vidéos uniquement
+      }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items = data?.contents?.sectionListRenderer?.contents?.[0]
+      ?.itemSectionRenderer?.contents || [];
+    return items
+      .map((item) => {
+        const v = item?.compactVideoRenderer || item?.videoRenderer;
+        if (!v?.videoId) return null;
+        return {
+          id: v.videoId,
+          title: v.title?.runs?.[0]?.text || v.title?.simpleText || "",
+          artist: v.shortBylineText?.runs?.[0]?.text || "",
+          duration: parseDuration(v.lengthText?.simpleText),
+          thumbnail: v.thumbnail?.thumbnails?.at(-1)?.url || "",
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 15);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function normalizePiped(item) {
